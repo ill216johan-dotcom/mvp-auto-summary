@@ -1,0 +1,1 @@
+{"model": "glm-4.7-flash", "messages": [{"role": "system", "content": "You are a business analyst. Return only the final digest. No analysis."}, {"role": "user", "content": "LEAD-001: Client wants proposal. LEAD-002: Agreed on Start plan."}], "temperature": 0.2, "max_tokens": 200, "stream": false}

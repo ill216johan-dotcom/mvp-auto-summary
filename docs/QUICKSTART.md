@@ -1,6 +1,9 @@
 # Быстрый старт MVP Auto-Summary
 
 > Пошаговая инструкция запуска системы. Рассчитана на человека БЕЗ технического опыта.
+> Проверено: 2026-02-18. Все шаги протестированы на реальном сервере.
+
+> ⚠️ **Перед тем как начать** — прочитай `docs/ERRORS.md`. Там описаны все грабли на которые наступили при первом деплое. Это сэкономит тебе 3-4 часа.
 
 ---
 
@@ -74,18 +77,20 @@ echo "NFS_SERVER_IP:/recordings /mnt/recordings nfs defaults 0 0" >> /etc/fstab
 
 ---
 
-## Шаг 2: Скачай проект (2 минуты)
+## Шаг 2: Скопируй проект на сервер (2 минуты)
 
-```bash
-cd /opt
-git clone https://github.com/YOUR_ORG/mvp-auto-summary.git
-cd mvp-auto-summary
+**С Windows (PowerShell или CMD):**
+```powershell
+scp -r C:\Projects\mvp-auto-summary root@YOUR_VPS_IP:/root/
 ```
 
-> Если репозитория нет на GitHub — просто скопируй папку на сервер через scp:
-> ```bash
-> scp -r ./mvp-auto-summary root@YOUR_VPS_IP:/opt/
-> ```
+**Или через git (если есть репозиторий):**
+```bash
+cd /root
+git clone https://github.com/YOUR_ORG/mvp-auto-summary.git
+```
+
+Все дальнейшие команды выполняются из папки `/root/mvp-auto-summary` на сервере.
 
 ---
 
@@ -139,14 +144,16 @@ nano .env
 
 ---
 
-## Шаг 4: Запусти систему (5 минут)
+## Шаг 4: Запусти систему (5-10 минут)
 
 ```bash
+cd /root/mvp-auto-summary
+
 # Поднять все сервисы
 docker compose up -d
 
-# Подождать 1-2 минуты пока всё запустится
-sleep 60
+# Подождать пока всё запустится (особенно Whisper — скачивает модель ~1.5 GB)
+sleep 120
 
 # Проверить что всё работает
 docker compose ps
@@ -154,93 +161,161 @@ docker compose ps
 
 Ты должен увидеть 5 сервисов в статусе "Up":
 ```
-NAME                          STATUS
-mvp-auto-summary-n8n-1        Up
-mvp-auto-summary-postgres-1   Up
-mvp-auto-summary-surrealdb-1  Up
-mvp-auto-summary-open-notebook-1  Up
-mvp-auto-summary-whisper-1    Up
+NAME                               STATUS
+mvp-auto-summary-n8n-1             Up
+mvp-auto-summary-postgres-1        Up (healthy)
+mvp-auto-summary-surrealdb-1       Up
+mvp-auto-summary-open-notebook-1   Up
+mvp-auto-summary-whisper-1         Up
 ```
 
-> **Первый запуск Whisper займёт 3-5 минут** — он скачивает модель (~1.5 GB для medium).
+> **Первый запуск Whisper займёт 5-10 минут** — скачивает модель (~1.5 GB для medium).
+
+### ⚠️ ВАЖНО: перезапусти open-notebook после старта
+
+Open-notebook иногда стартует раньше чем SurrealDB готов принимать соединения (race condition). После того как все сервисы поднялись — перезапусти его:
+
+```bash
+# Подождать что SurrealDB полностью запустился
+sleep 30
+
+# Перезапустить open-notebook
+docker compose restart open-notebook
+
+# Убедиться что воркер стабилен (не перезапускается)
+sleep 15
+docker compose logs open-notebook --tail=5
+# Должно быть: "success: worker entered RUNNING state" — и больше ничего
+```
 
 ### Проверь доступность:
 
 | Сервис | URL | Что должно быть |
 |--------|-----|-----------------|
-| n8n | `http://VPS_IP:5678` | Страница входа |
+| n8n | `http://VPS_IP:5678` | Страница входа или форма регистрации |
 | open-notebook | `http://VPS_IP:8888` | Интерфейс блокнотов |
 | Whisper | `http://VPS_IP:9000/docs` | Swagger API документация |
 
+> **Если n8n показывает форму регистрации** — это нормально при первом запуске. Введи любой email и пароль из `.env` (`N8N_PASSWORD`). Эти данные станут твоим логином.
+
 ---
 
-## Шаг 5: Настрой n8n (10 минут)
+## Шаг 5: Настрой n8n (15-20 минут)
 
 ### 5.1 Войди в n8n
 
-1. Открой `http://VPS_IP:5678`
-2. Логин: значение `N8N_USER` из .env (по умолчанию `admin`)
-3. Пароль: значение `N8N_PASSWORD` из .env
+1. Открой `http://VPS_IP:5678` в браузере
+2. **При первом открытии** — покажет форму регистрации. Введи:
+   - Email: любой (например `admin@mvp.local`)
+   - Имя: любое
+   - Пароль: тот же что в `.env` (`N8N_PASSWORD`)
+3. При следующих входах — используй эти же email и пароль
 
-### 5.2 Импортируй Workflows
+### 5.2 Создай credentials для PostgreSQL
 
-1. В n8n перейди: **Menu** → **Import from file**
-2. Загрузи `n8n-workflows/01-new-recording.json`
-3. Повтори для `n8n-workflows/02-daily-digest.json`
+Это нужно сделать ДО импорта workflows, иначе придётся настраивать каждую ноду вручную.
 
-### 5.3 Настрой PostgreSQL Credentials
-
-В каждом workflow есть ноды PostgreSQL. Нужно создать credentials:
-
-1. Кликни на любой PostgreSQL node
-2. Нажми **Create new credential**
+1. В n8n: левое меню → **Credentials** → кнопка **Add credential**
+2. Найди **PostgreSQL** → выбери
 3. Заполни:
-   - **Host**: `postgres`
+   - **Host**: `postgres` ← именно так, не IP!
    - **Port**: `5432`
-   - **Database**: `n8n` (или значение из .env)
-   - **User**: `n8n` (или значение из .env)
-   - **Password**: значение `POSTGRES_PASSWORD` из .env
-4. Нажми **Save**
-5. Выбери эти credentials во ВСЕХ PostgreSQL нодах обоих workflows
+   - **Database**: `n8n`
+   - **User**: `n8n`
+   - **Password**: значение `POSTGRES_PASSWORD` из `.env`
+   - **SSL**: `disable`
+4. Нажми **Save** — назови credential `PostgreSQL MVP`
+
+### 5.3 Импортируй Workflows
+
+1. В n8n: левое меню → **Workflows** → кнопка **⋮** (три точки) → **Import from file**
+2. Загрузи файл `n8n-workflows/01-new-recording.json`
+3. После импорта — открой workflow, убедись что все PostgreSQL-ноды используют credential `PostgreSQL MVP`
+4. Повтори для `n8n-workflows/02-daily-digest.json`
+
+> **Если credential не привязался автоматически**: кликни на каждую ноду с базой данных → в поле Credential выбери `PostgreSQL MVP` вручную.
 
 ### 5.4 Активируй Workflows
 
-1. Открой каждый workflow
-2. В правом верхнем углу нажми тогл **Active** → включи
-3. Workflow начнёт работать по расписанию
+1. Открой **Workflow 01** (01 New Recording...)
+2. В правом верхнем углу переключи тогл с **Inactive** на **Active**
+3. Повтори для **Workflow 02** (02 Daily Digest...)
+
+После активации workflow 01 начнёт сканировать папку каждые 5 минут автоматически.
 
 ---
 
-## Шаг 6: Протестируй (5 минут)
+## Шаг 6: Протестируй (10 минут)
 
-### 6.1 Создай тестовый файл записи
+### 6.1 Создай тестовую папку и файл
 
+На сервере (в Putty):
 ```bash
-# На VPS:
-cd /opt/mvp-auto-summary
-chmod +x scripts/simulate-recording.sh
-bash scripts/simulate-recording.sh 99999
+# Создать папку с сегодняшней датой
+mkdir -p /mnt/recordings/$(date +%Y/%m/%d)
+
+# Создать тестовый WAV-файл (замени ДАТУ на сегодняшнюю в формате YYYY-MM-DD)
+dd if=/dev/urandom bs=96000 count=1 > /mnt/recordings/$(date +%Y/%m/%d)/99999_$(date +%Y-%m-%d)_10-00.wav
+
+# Убедиться что файл создан
+ls -lh /mnt/recordings/$(date +%Y/%m/%d)/
 ```
 
-Это создаст тестовый файл `/mnt/recordings/2026/02/18/99999_2026-02-18_XX-XX.mp3`.
+> **Примечание**: тестовый файл из `/dev/urandom` — это случайный шум, не речь. Whisper распознает его как "СПОКОЙНАЯ МУЗЫКА" или пустую строку. Это нормально — pipeline всё равно пройдёт полностью. Для реального теста нужна реальная запись разговора.
 
-### 6.2 Подожди 5 минут
+### 6.2 Запусти Workflow 01 вручную
 
-Workflow 01 сканирует папку каждые 5 минут. Или запусти вручную:
-1. В n8n открой Workflow 01
-2. Нажми **Execute Workflow** (кнопка ▶)
+1. Открой в браузере `http://VPS_IP:5678`
+2. Войди в n8n → открой **Workflow 01 New Recording v3 FINAL**
+3. Нажми кнопку **Execute Workflow** (в правом нижнем углу)
+4. Наблюдай как ноды загораются зелёным слева направо
 
-### 6.3 Проверь результат
+**Ожидаемый результат**: все ноды зелёные, последняя — **Mark Completed**.
 
-1. В n8n → **Executions** — должно быть успешное выполнение
-2. В open-notebook (`http://VPS_IP:8888`) — должен появиться блокнот `LEAD-99999`
-3. В PostgreSQL (через n8n SQL node): `SELECT * FROM processed_files`
+### 6.3 Проверь результат в базе
 
-### 6.4 Протестируй дайджест
+В Putty:
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "SELECT filename, status, summary_sent, created_at FROM processed_files ORDER BY created_at DESC LIMIT 5;"
+```
 
-1. В n8n открой Workflow 02
-2. Нажми **Execute Workflow** вручную
-3. Проверь Telegram-чат — должен прийти дайджест
+Должно быть `status = completed`.
+
+### 6.4 Проверь open-notebook
+
+1. Открой `http://VPS_IP:8888`
+2. Должен появиться блокнот `LEAD-99999`
+3. Внутри — транскрипт из Whisper (даже если это "СПОКОЙНАЯ МУЗЫКА")
+
+### 6.5 Протестируй дайджест (Workflow 02)
+
+> **Важно**: Workflow 02 отправляет дайджест только если есть записи со статусом `completed` за сегодня. После шага 6.2 такая запись есть.
+
+1. В n8n открой **Workflow 02 — Daily Digest → GLM-4 → Telegram**
+2. Нажми **Execute Workflow**
+3. Подожди 20-30 секунд (GLM-4 суммаризирует)
+4. Проверь Telegram-чат кураторов — должен прийти дайджест
+
+### 6.6 Что делать если что-то пошло не так
+
+```bash
+# Посмотреть логи n8n
+docker compose logs n8n --tail=30
+
+# Посмотреть логи open-notebook
+docker compose logs open-notebook --tail=20
+
+# Посмотреть состояние базы
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "SELECT filename, status FROM processed_files ORDER BY created_at DESC;"
+
+# Сбросить тестовые данные и начать заново
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "DELETE FROM processed_files;"
+```
+
+Смотри `docs/ERRORS.md` — там описаны все известные ошибки с решениями.
 
 ---
 
@@ -330,4 +405,36 @@ Workflow 01 сканирует папку каждые 5 минут. Или за
 
 ---
 
-*Документ создан: 2026-02-18 | Для вопросов: см. docs/ERRORS.md*
+## Частые проблемы при первом запуске
+
+| Симптом | Причина | Решение |
+|---------|---------|---------|
+| n8n показывает форму регистрации | Первый запуск | Нормально — введи любые данные |
+| open-notebook не открывается сразу | Race condition с SurrealDB | `docker compose restart open-notebook` |
+| Workflow 01 ничего не делает | Нет файлов или все уже обработаны | Создай новый файл с другим именем |
+| Workflow 01 застрял на ноде — статус `error` | Whisper или open-notebook недоступен | `docker compose ps` — проверь все контейнеры |
+| Workflow 02 ничего не отправляет | Нет `status='completed'` записей | Сначала запусти Workflow 01 с тестовым файлом |
+| Whisper стартует долго | Скачивает модель (~1.5 GB) | Подожди 5-10 минут при первом запуске |
+| `EROFS: read-only file system` | Попытка писать внутрь контейнера n8n | Создавай файлы на хосте, в `/mnt/recordings/` |
+
+---
+
+## Именование файлов записей — КРИТИЧНО
+
+Система распознаёт клиента по имени файла. Формат строгий:
+
+```
+{LEAD_ID}_{YYYY-MM-DD}_{HH-MM}.{wav|mp3|webm}
+
+Примеры:
+  12345_2026-02-18_14-30.wav   ✅ — клиент 12345, запись от 18 февраля
+  99999_2026-03-01_09-15.mp3   ✅ — клиент 99999
+  meeting_2026-02-18.wav       ❌ — нет LEAD_ID, система пропустит
+  12345.wav                    ❌ — нет даты, система пропустит
+```
+
+LEAD_ID должен совпадать с ID клиента в Bitrix24 (или другой CRM).
+
+---
+
+*Документ создан: 2026-02-18 | Обновлён: 2026-02-18 — добавлены реальные инструкции по деплою*

@@ -24,7 +24,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [220, 0],
-      "credentials": { "postgres": { "id": "CONFIGURE_ME", "name": "PostgreSQL" } }
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
     {
       "parameters": {
@@ -64,7 +64,7 @@
         "url": "={{ ($env.GLM4_BASE_URL || 'https://api.z.ai/api/paas/v4') + '/chat/completions' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.GLM4_MODEL || 'glm-4.7-flashx', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Сформируй ежедневный дайджест по стенограммам встреч. Формат: 1) Краткое резюме дня (3-5 предложений). 2) Ключевые договоренности (буллеты). 3) Action items (буллеты с ответственным, если есть). 4) Риски/блокеры (буллеты или \'Нет\'). 5) Клиенты/LEAD: перечисли LEAD-ID, по каждому 1-2 ключевых пункта. Ограничение: до 3500 символов.' }, { role: 'user', content: $json.combined } ], temperature: 0.2, max_tokens: 1400, stream: false }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $env.GLM4_MODEL || 'glm-4.7-flashx', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Сформируй ежедневный дайджест по стенограммам встреч. Формат: 1) Краткое резюме дня (3-5 предложений). 2) Ключевые договоренности (буллеты). 3) Action items (буллеты с ответственным, если есть). 4) Риски/блокеры (буллеты или Нет). 5) Клиенты/LEAD: перечисли LEAD-ID, по каждому 1-2 ключевых пункта. Ограничение: до 3500 символов.' }, { role: 'user', content: $json.combined } ], temperature: 0.2, max_tokens: 1400, stream: false }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -137,7 +137,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [1980, -120],
-      "credentials": { "postgres": { "id": "CONFIGURE_ME", "name": "PostgreSQL" } }
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     }
   ],
   "connections": {

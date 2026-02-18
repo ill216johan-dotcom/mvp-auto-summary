@@ -1,0 +1,1 @@
+{"model": "glm-4-flash", "messages": [{"role": "system", "content": "You are a business analyst. Create a short daily digest. Format: 1) Summary. 2) Agreements. 3) Action items."}, {"role": "user", "content": "LEAD-001: Client wants proposal. LEAD-002: Agreed on Start plan."}], "temperature": 0.2, "max_tokens": 200, "stream": false}
