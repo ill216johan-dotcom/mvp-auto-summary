@@ -1,0 +1,35 @@
+# Environment
+.env
+.env.local
+.env.production
+
+# Docker volumes (local data)
+volumes/
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Audio files (too large for git)
+*.webm
+*.mp3
+*.ogg
+*.wav
+*.m4a
+
+# Secrets
+*.pem
+*.key
+credentials.json
