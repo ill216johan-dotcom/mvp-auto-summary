@@ -597,4 +597,126 @@ grep -i telegram /root/mvp-auto-summary/.env
 
 ---
 
-*Document created: 2026-02-18 | Updated: 2026-02-18 — added E041 (GLM balance), E042 (Telegram $env denied)*
+### E043: GLM-4.7-Flash возвращает пустой `content` (thinking-модель)
+
+**Symptom**: Workflow 02 выполняется успешно, GLM-4 возвращает ответ, но в Telegram приходит:
+```
+Ежедневный дайджест за 19.02.2026
+Встреч: 3
+Клиенты: LEAD-101, LEAD-102, LEAD-103
+
+Сводка не получена.
+```
+
+При этом в execution видно, что `message.content` пустой, а `message.reasoning_content` содержит длинный текст ("Analyze the Request...", "Draft 1...", "Draft 2..." и т.д.).
+
+**Root Cause**: Модель `glm-4.7-flash` — это **thinking-модель** (модель с цепочкой рассуждений). По умолчанию она:
+1. Пишет ход рассуждений в поле `reasoning_content`
+2. Пишет финальный ответ в поле `content`
+3. Иногда `content` остаётся пустым — весь ответ в `reasoning_content`
+
+Нода Build Digest читала только `content` → пусто → "Сводка не получена".
+
+**Доказательство** (официальная документация ZhipuAI):
+- Документация Thinking Mode: https://docs.z.ai/guides/capabilities/thinking-mode
+- GLM-4.5 и выше (включая GLM-4.7-Flash) по умолчанию включают thinking mode
+- Поле `reasoning_content` появляется только у thinking-моделей
+
+**Fix (рекомендуется)**: Отключить thinking mode в запросе:
+```json
+{
+  "model": "glm-4.7-flash",
+  "messages": [...],
+  "temperature": 0.2,
+  "max_tokens": 1400,
+  "stream": false,
+  "thinking": { "type": "disabled" }
+}
+```
+
+В n8n нода GLM-4 Summarize → jsonBody (Expression):
+```javascript
+={{ JSON.stringify({ 
+  model: 'glm-4.7-flash', 
+  messages: [...], 
+  temperature: 0.2, 
+  max_tokens: 1400, 
+  stream: false, 
+  thinking: { type: "disabled" } 
+}) }}
+```
+
+**Fallback (дополнительная защита)**: Обновить ноду Build Digest:
+```javascript
+const msg = $json.choices && $json.choices[0] && $json.choices[0].message ? $json.choices[0].message : {};
+const rawContent = (msg.content || '').trim();
+const rawReasoning = (msg.reasoning_content || '').trim();
+const summaryText = rawContent || rawReasoning || 'Сводка не получена.';
+```
+
+**Проверка после фикса**:
+```bash
+curl -s -X POST https://open.bigmodel.cn/api/paas/v4/chat/completions \
+  -H "Authorization: Bearer ВАШ_КЛЮЧ" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.7-flash","messages":[{"role":"user","content":"Привет"}],"max_tokens":50,"thinking":{"type":"disabled"}}'
+```
+Ожидается: `content` заполнен, `reasoning_content` пустой или отсутствует.
+
+---
+
+### E044: Workflow 02 останавливается на Load Today's Transcripts
+
+**Symptom**: Workflow 02 выполняется, но последняя зелёная нода — "Load Today's Transcripts". Дальше workflow не идёт.
+
+**Root Cause**: SQL запрос возвращает 0 строк. Возможные причины:
+
+1. **`summary_sent = true`** — записи уже обработаны предыдущим запуском
+2. **`transcript_text IS NULL`** — нет текста транскрипта
+3. **Дата не совпадает** — view `v_today_completed` фильтрует по текущей дате
+
+**Диагностика**:
+```bash
+# Проверить данные в view
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT * FROM v_today_completed LIMIT 5;"
+
+# Проверить фильтр summary_sent
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT id, summary_sent, transcript_text IS NOT NULL as has_text FROM processed_files WHERE status='completed' ORDER BY id DESC LIMIT 10;"
+```
+
+**Fix**:
+```bash
+# Сбросить summary_sent для повторной обработки
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "UPDATE processed_files SET summary_sent = false WHERE id IN (18, 19, 20);"
+```
+
+**Fix (создать тестовые данные)**:
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "INSERT INTO processed_files (filename, filepath, lead_id, status, summary_sent, transcript_text, created_at) VALUES ('TEST101_2026-02-19.wav', '/recordings/TEST101.wav', 101, 'completed', false, 'Текст транскрипта...', NOW());"
+```
+
+**Важно**: Поле `filepath` обязательное (NOT NULL constraint).
+
+---
+
+### E045: INSERT в processed_files — null value in column "filepath"
+
+**Symptom**:
+```
+ERROR: null value in column "filepath" of relation "processed_files" violates not-null constraint
+```
+
+**Root Cause**: Таблица `processed_files` имеет обязательное поле `filepath`. При INSERT без указания filepath — ошибка.
+
+**Fix**: Всегда указывать filepath:
+```bash
+# НЕПРАВИЛЬНО:
+INSERT INTO processed_files (filename, lead_id, status, ...) VALUES (...);
+
+# ПРАВИЛЬНО:
+INSERT INTO processed_files (filename, filepath, lead_id, status, ...) VALUES ('test.wav', '/recordings/test.wav', ...);
+```
+
+---
+
+*Document created: 2026-02-18 | Updated: 2026-02-19 — added E043 (GLM thinking mode), E044 (Load Today stops), E045 (filepath NOT NULL)*
