@@ -1,10 +1,15 @@
 {
-  "name": "01 — New Recording → Whisper → open-notebook",
+  "name": "01 New Recording → SpeechKit Async → Notebook",
   "nodes": [
     {
       "parameters": {
         "rule": {
-          "interval": [{ "field": "cronExpression", "expression": "*/5 * * * *" }]
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
         }
       },
       "id": "schedule-trigger",
@@ -15,7 +20,7 @@
     },
     {
       "parameters": {
-        "command": "find /recordings -type f \\( -name '*.webm' -o -name '*.mp3' -o -name '*.ogg' -o -name '*.wav' \\) -exec stat -c '%Y %n' {} \\; 2>/dev/null | sort -rn | head -50 | cut -d' ' -f2-"
+        "command": "find /recordings -type f \\( -name '*.webm' -o -name '*.mp3' -o -name '*.ogg' -o -name '*.wav' \\) -exec stat -c '%s %n' {} \\; 2>/dev/null | head -50"
       },
       "id": "list-files",
       "name": "List Recording Files",
@@ -25,7 +30,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const stdout = $input.first().json.stdout || '';\nconst files = stdout.trim().split('\\n').filter(f => f.length > 0);\n\nconst items = files.map(filepath => {\n  const filename = filepath.split('/').pop();\n  const match = filename.match(/^(\\d+)_/);\n  const leadId = match ? match[1] : null;\n  const dateMatch = filename.match(/(\\d{4}-\\d{2}-\\d{2})/);\n  const fileDate = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10);\n  \n  return {\n    json: {\n      filepath,\n      filename,\n      leadId,\n      fileDate\n    }\n  };\n}).filter(item => item.json.leadId !== null);\n\nif (items.length === 0) {\n  return [{ json: { _noFiles: true } }];\n}\n\nreturn items;"
+        "jsCode": "const stdout = $input.first().json.stdout || '';\nconst lines = stdout.trim().split('\\n').filter(f => f.length > 0);\nconst MAX_SIZE_BYTES = 100 * 1024 * 1024;\nconst items = lines.map(line => {\n  const spaceIdx = line.indexOf(' ');\n  const fileSize = spaceIdx > 0 ? parseInt(line.slice(0, spaceIdx)) : 0;\n  const filepath = spaceIdx > 0 ? line.slice(spaceIdx + 1).trim() : line.trim();\n  const filename = filepath.split('/').pop();\n  const match = filename.match(/^(\\d+)[_\\-\\.]/);\n  const leadId = match ? match[1] : 'UNKNOWN';\n  const dateMatch = filename.match(/(\\d{4}-\\d{2}-\\d{2})/);\n  const fileDate = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10);\n  const tooLarge = fileSize > MAX_SIZE_BYTES;\n  return { json: { filepath, filename, leadId, fileDate, fileSize, tooLarge } };\n}).filter(item => !item.json.tooLarge);\nif (items.length === 0) { return [{ json: { _noFiles: true } }]; }\nreturn items;\n"
       },
       "id": "parse-files",
       "name": "Parse Filenames & LEAD_ID",
@@ -36,13 +41,20 @@
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
           "conditions": [
             {
               "id": "no-files-check",
               "leftValue": "={{ $json._noFiles }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "equal" }
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
             }
           ],
           "combinator": "and"
@@ -57,26 +69,40 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT COUNT(*)::integer as count FROM processed_files WHERE filename = '{{ $json.filename }}'",
-        "options": {}
+        "query": "SELECT COUNT(*)::integer as count FROM processed_files WHERE filename = $1",
+        "options": {
+          "queryReplacement": "={{ $json.filename }}"
+        }
       },
       "id": "check-processed",
       "name": "Check If Already Processed",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [880, -100],
-      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      }
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
           "conditions": [
             {
               "id": "not-processed",
               "leftValue": "={{ $json.count }}",
               "rightValue": 0,
-              "operator": { "type": "number", "operation": "equals" }
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
             }
           ],
           "combinator": "and"
@@ -91,47 +117,72 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO processed_files (filename, filepath, lead_id, file_date, status) VALUES ('{{ $('Parse Filenames & LEAD_ID').item.json.filename }}', '{{ $('Parse Filenames & LEAD_ID').item.json.filepath }}', '{{ $('Parse Filenames & LEAD_ID').item.json.leadId }}', '{{ $('Parse Filenames & LEAD_ID').item.json.fileDate }}', 'transcribing') ON CONFLICT (filename) DO NOTHING RETURNING id",
-        "options": {}
+        "query": "INSERT INTO processed_files (filename, filepath, lead_id, file_date, status) VALUES ($1, $2, $3, $4, 'transcribing') ON CONFLICT (filename) DO NOTHING RETURNING id",
+        "options": {
+          "queryReplacement": "={{ $('Parse Filenames & LEAD_ID').first().json.filename }}||={{ $('Parse Filenames & LEAD_ID').first().json.filepath }}||={{ $('Parse Filenames & LEAD_ID').first().json.leadId }}||={{ $('Parse Filenames & LEAD_ID').first().json.fileDate }}"
+        }
       },
       "id": "insert-processing",
       "name": "Mark as Transcribing",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [1320, -200],
-      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      }
     },
     {
       "parameters": {
-        "command": "={{ \"curl -sS -X POST 'http://whisper:9000/asr?task=transcribe&language=ru&output=json' -F \\\"audio_file=@\" + $('Parse Filenames & LEAD_ID').item.json.filepath + \"\\\" 2>&1\" }}"
+        "jsCode": "// Отправляем файл на асинхронный сервер транскрипции (transcribe_server.py:9001)\nconst filepath = $('Parse Filenames & LEAD_ID').first().json.filepath;\nconst filename = $('Parse Filenames & LEAD_ID').first().json.filename;\n\ntry {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'http://172.17.0.1:9001/',\n    body: JSON.stringify({ filepath: filepath, filename: filename }),\n    headers: { 'Content-Type': 'application/json' },\n    timeout: 30000\n  });\n  return [{ json: { ...response, _submitted: true } }];\n} catch (e) {\n  return [{ json: { _submitted: false, _error: e.message } }];\n}"
       },
-      "id": "whisper-transcribe",
-      "name": "Whisper Transcribe",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
+      "id": "speechkit-transcribe",
+      "name": "SpeechKit Transcribe (async)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [1540, -200],
       "continueOnFail": true
     },
     {
       "parameters": {
-        "jsCode": "const stdout = $input.first().json.stdout || '';\ntry {\n  const parsed = JSON.parse(stdout.trim());\n  return [{ json: { text: parsed.text || '', _raw: stdout } }];\n} catch(e) {\n  return [{ json: { text: '', _raw: stdout, _parseError: e.message } }];\n}"
+        "amount": 3,
+        "unit": "minutes"
       },
-      "id": "parse-whisper",
-      "name": "Parse Whisper JSON",
+      "id": "wait-transcription",
+      "name": "Wait 3 min",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1760, -200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Проверяем готовность транскрипции через /check endpoint\n// Retry loop: до 10 попыток с паузой 60 секунд (макс. ~13 минут суммарно)\nconst filename = $('Parse Filenames & LEAD_ID').first().json.filename;\nconst maxAttempts = 10;\nconst waitMs = 60000; // 60 секунд\n\nfor (let i = 0; i < maxAttempts; i++) {\n  try {\n    const result = await this.helpers.httpRequest({\n      method: 'POST',\n      url: 'http://172.17.0.1:9001/check',\n      body: JSON.stringify({ filename: filename }),\n      headers: { 'Content-Type': 'application/json' },\n      timeout: 10000\n    });\n\n    if (result && result.transcript) {\n      return [{ json: { text: result.transcript, attempts: i + 1, filename: filename } }];\n    }\n\n    // Если ещё обрабатывается — подождать\n    if (i < maxAttempts - 1) {\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n  } catch (e) {\n    // Ошибка сети — подождать и попробовать снова\n    if (i < maxAttempts - 1) {\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n  }\n}\n\n// Все попытки исчерпаны\nreturn [{ json: { text: '', _notReady: true, attempts: maxAttempts, filename: filename } }];"
+      },
+      "id": "check-transcript",
+      "name": "Check Transcript (retry)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1660, -200]
+      "position": [1980, -200]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
           "conditions": [
             {
               "id": "has-text",
               "leftValue": "={{ $json.text }}",
               "rightValue": "",
-              "operator": { "type": "string", "operation": "notEmpty" }
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
             }
           ],
           "combinator": "and"
@@ -141,18 +192,7 @@
       "name": "Has Transcript?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1860, -200]
-    },
-    {
-      "parameters": {
-        "command": "cat '{{ $('Parse Filenames & LEAD_ID').item.json.filepath }}' | base64"
-      },
-      "id": "read-audio-file",
-      "name": "Read Audio File",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [1320, -50],
-      "disabled": true
+      "position": [2200, -200]
     },
     {
       "parameters": {
@@ -162,56 +202,57 @@
       "name": "Extract Transcript",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1760, -200]
+      "position": [2420, -300]
     },
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ ($env.OPEN_NOTEBOOK_URL || 'http://open-notebook:8888') + '/notebooks' }}",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            { "name": "archived", "value": "false" }
-          ]
-        },
+        "url": "http://open-notebook:5055/api/sources",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "={{ 'Bearer ' + ($env.OPEN_NOTEBOOK_TOKEN || 'password') }}"
+              "value": "Bearer password"
             }
           ]
         },
-        "options": {}
+        "options": { "timeout": 30000 }
       },
       "id": "get-notebooks",
       "name": "Get Notebooks",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1980, -200],
+      "position": [2640, -300],
       "continueOnFail": true
     },
     {
       "parameters": {
-        "jsCode": "const notebooks = $input.first().json.items || $input.first().json || [];\nconst notebookName = $('Extract Transcript').first().json.notebookName;\n\nconst existing = (Array.isArray(notebooks) ? notebooks : []).find(\n  nb => nb.name === notebookName\n);\n\nreturn [{\n  json: {\n    notebookId: existing ? existing.id : null,\n    notebookExists: !!existing,\n    notebookName\n  }\n}];"
+        "jsCode": "const response = $input.first().json;\nconst notebooks = response.items || response.data || (Array.isArray(response) ? response : []);\nconst notebookName = $('Extract Transcript').first().json.notebookName;\n\nconst existing = (Array.isArray(notebooks) ? notebooks : []).find(\n  nb => nb.name === notebookName\n);\n\nreturn [{\n  json: {\n    notebookId: existing ? (existing.id || existing._id) : null,\n    notebookExists: !!existing,\n    notebookName\n  }\n}];"
       },
       "id": "find-notebook",
       "name": "Find Client Notebook",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2200, -200]
+      "position": [2860, -300]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
           "conditions": [
             {
               "id": "notebook-exists",
               "leftValue": "={{ $json.notebookExists }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "false" }
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              }
             }
           ],
           "combinator": "and"
@@ -221,12 +262,12 @@
       "name": "Notebook Exists?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [2420, -200]
+      "position": [3080, -300]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.OPEN_NOTEBOOK_URL || 'http://open-notebook:8888') + '/notebooks' }}",
+        "url": "http://open-notebook:5055/api/sources",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ name: $('Extract Transcript').first().json.notebookName, description: 'Client meetings for ' + $('Extract Transcript').first().json.notebookName }) }}",
@@ -235,64 +276,71 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "={{ 'Bearer ' + ($env.OPEN_NOTEBOOK_TOKEN || 'password') }}"
+              "value": "Bearer password"
             }
           ]
         },
-        "options": {}
+        "options": { "timeout": 30000 }
       },
       "id": "create-notebook",
       "name": "Create Notebook",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2640, -300],
+      "position": [3300, -400],
       "continueOnFail": true
     },
     {
       "parameters": {
-        "jsCode": "let notebookId;\n\n// Check if we created a new notebook or used existing\nconst createResult = $('Create Notebook');\nconst findResult = $('Find Client Notebook').first().json;\n\nif (findResult.notebookId) {\n  notebookId = findResult.notebookId;\n} else {\n  const created = $input.first().json;\n  notebookId = created.id || created.notebook_id;\n}\n\nreturn [{ json: { notebookId } }];"
+        "jsCode": "let notebookId;\n\nconst findResult = $('Find Client Notebook').first().json;\n\nif (findResult.notebookId) {\n  notebookId = findResult.notebookId;\n} else {\n  const created = $input.first().json;\n  notebookId = created.id || created._id || created.notebook_id || '';\n}\n\nreturn [{ json: { notebookId } }];"
       },
       "id": "get-notebook-id",
       "name": "Get Notebook ID",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2860, -200]
+      "position": [3520, -300]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.OPEN_NOTEBOOK_URL || 'http://open-notebook:8888') + '/sources' }}",
+        "url": "={{ 'http://open-notebook:5055/api/sources/' + $json.notebookId + '/entries' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ type: 'text', text: $('Extract Transcript').first().json.transcript, notebook_ids: [$json.notebookId], title: $('Extract Transcript').first().json.sourceTitle }) }}",
+        "jsonBody": "={{ JSON.stringify({ content: $('Extract Transcript').first().json.transcript, title: $('Extract Transcript').first().json.sourceTitle }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "={{ 'Bearer ' + ($env.OPEN_NOTEBOOK_TOKEN || 'password') }}"
+              "value": "Bearer password"
             }
           ]
         },
-        "options": {}
+        "options": { "timeout": 60000 }
       },
       "id": "save-source",
       "name": "Save Transcript to Notebook",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3080, -200],
+      "position": [3740, -300],
       "continueOnFail": true
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
           "conditions": [
             {
               "id": "save-ok",
               "leftValue": "={{ $json.error }}",
               "rightValue": "",
-              "operator": { "type": "string", "operation": "equals" }
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
             }
           ],
           "combinator": "and"
@@ -302,68 +350,142 @@
       "name": "Save Success?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [3300, -200]
+      "position": [3960, -300]
     },
     {
       "parameters": {
         "operation": "executeQuery",
         "query": "UPDATE processed_files SET status = 'completed', transcript_text = $1, notebook_id = $2, source_id = $3, completed_at = NOW() WHERE filename = $4",
         "options": {
-          "queryReplacement": "={{ $('Extract Transcript').first().json.transcript }}||={{ $('Get Notebook ID').first().json.notebookId }}||={{ $json.id || '' }}||={{ $('Extract Transcript').first().json.filename }}"
+          "queryReplacement": "={{ $('Extract Transcript').first().json.transcript }}||={{ $('Get Notebook ID').first().json.notebookId }}||={{ $json.id || $json._id || '' }}||={{ $('Extract Transcript').first().json.filename }}"
         }
       },
       "id": "mark-completed",
       "name": "Mark Completed",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3520, -200],
-      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+      "position": [4180, -400],
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      }
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "UPDATE processed_files SET status = 'error', error_message = 'open-notebook error: ' || COALESCE($json.error, $json.message, 'Unknown') WHERE filename = '{{ $('Extract Transcript').first().json.filename }}'",
-        "options": {}
+        "query": "UPDATE processed_files SET status = 'error', error_message = $1 WHERE filename = $2",
+        "options": {
+          "queryReplacement": "={{ 'open-notebook save error: ' + ($json.error || $json.message || 'Unknown') }}||={{ $('Extract Transcript').first().json.filename }}"
+        }
       },
       "id": "mark-notebook-error",
       "name": "Mark Notebook Error",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3520, 100],
-      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+      "position": [4180, -100],
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      }
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "UPDATE processed_files SET status = 'error', error_message = '{{ ($json.error && $json.error.message) ? $json.error.message : ($json.message || $json.error || \"Unknown error\") }}', retry_count = retry_count + 1 WHERE filename = '{{ $('Parse Filenames & LEAD_ID').item.json.filename }}'",
-        "options": {}
+        "query": "UPDATE processed_files SET status = 'error', error_message = $1, retry_count = retry_count + 1 WHERE filename = $2",
+        "options": {
+          "queryReplacement": "={{ ($json._notReady ? 'Transcription timeout after ' + $json.attempts + ' attempts' : ($json._error || 'Empty transcript')) }}||={{ $('Parse Filenames & LEAD_ID').first().json.filename }}"
+        }
       },
       "id": "mark-error",
       "name": "Mark Error",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1760, 100],
-      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+      "position": [2420, 100],
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      }
     }
   ],
   "connections": {
-    "Every 5 min": { "main": [[{ "node": "List Recording Files", "type": "main", "index": 0 }]] },
-    "List Recording Files": { "main": [[{ "node": "Parse Filenames & LEAD_ID", "type": "main", "index": 0 }]] },
-    "Parse Filenames & LEAD_ID": { "main": [[{ "node": "Check If Already Processed", "type": "main", "index": 0 }]] },
-    "Check If Already Processed": { "main": [[{ "node": "Is New File?", "type": "main", "index": 0 }]] },
-    "Is New File?": { "main": [[{ "node": "Mark as Transcribing", "type": "main", "index": 0 }], []] },
-    "Mark as Transcribing": { "main": [[{ "node": "Whisper Transcribe", "type": "main", "index": 0 }]] },
-    "Whisper Transcribe": { "main": [[{ "node": "Parse Whisper JSON", "type": "main", "index": 0 }]] },
-    "Parse Whisper JSON": { "main": [[{ "node": "Has Transcript?", "type": "main", "index": 0 }]] },
-    "Has Transcript?": { "main": [[{ "node": "Extract Transcript", "type": "main", "index": 0 }], [{ "node": "Mark Error", "type": "main", "index": 0 }]] },
-    "Extract Transcript": { "main": [[{ "node": "Get Notebooks", "type": "main", "index": 0 }]] },
-    "Get Notebooks": { "main": [[{ "node": "Find Client Notebook", "type": "main", "index": 0 }]] },
-    "Find Client Notebook": { "main": [[{ "node": "Notebook Exists?", "type": "main", "index": 0 }]] },
-    "Notebook Exists?": { "main": [[{ "node": "Create Notebook", "type": "main", "index": 0 }], [{ "node": "Get Notebook ID", "type": "main", "index": 0 }]] },
-    "Create Notebook": { "main": [[{ "node": "Get Notebook ID", "type": "main", "index": 0 }]] },
-    "Get Notebook ID": { "main": [[{ "node": "Save Transcript to Notebook", "type": "main", "index": 0 }]] },
-    "Save Transcript to Notebook": { "main": [[{ "node": "Save Success?", "type": "main", "index": 0 }]] },
-    "Save Success?": { "main": [[{ "node": "Mark Completed", "type": "main", "index": 0 }], [{ "node": "Mark Notebook Error", "type": "main", "index": 0 }]] }
+    "Every 5 min": {
+      "main": [[{ "node": "List Recording Files", "type": "main", "index": 0 }]]
+    },
+    "List Recording Files": {
+      "main": [[{ "node": "Parse Filenames & LEAD_ID", "type": "main", "index": 0 }]]
+    },
+    "Parse Filenames & LEAD_ID": {
+      "main": [[{ "node": "Has Files?", "type": "main", "index": 0 }]]
+    },
+    "Has Files?": {
+      "main": [
+        [],
+        [{ "node": "Check If Already Processed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check If Already Processed": {
+      "main": [[{ "node": "Is New File?", "type": "main", "index": 0 }]]
+    },
+    "Is New File?": {
+      "main": [
+        [{ "node": "Mark as Transcribing", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Mark as Transcribing": {
+      "main": [[{ "node": "SpeechKit Transcribe (async)", "type": "main", "index": 0 }]]
+    },
+    "SpeechKit Transcribe (async)": {
+      "main": [[{ "node": "Wait 3 min", "type": "main", "index": 0 }]]
+    },
+    "Wait 3 min": {
+      "main": [[{ "node": "Check Transcript (retry)", "type": "main", "index": 0 }]]
+    },
+    "Check Transcript (retry)": {
+      "main": [[{ "node": "Has Transcript?", "type": "main", "index": 0 }]]
+    },
+    "Has Transcript?": {
+      "main": [
+        [{ "node": "Extract Transcript", "type": "main", "index": 0 }],
+        [{ "node": "Mark Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Transcript": {
+      "main": [[{ "node": "Get Notebooks", "type": "main", "index": 0 }]]
+    },
+    "Get Notebooks": {
+      "main": [[{ "node": "Find Client Notebook", "type": "main", "index": 0 }]]
+    },
+    "Find Client Notebook": {
+      "main": [[{ "node": "Notebook Exists?", "type": "main", "index": 0 }]]
+    },
+    "Notebook Exists?": {
+      "main": [
+        [{ "node": "Create Notebook", "type": "main", "index": 0 }],
+        [{ "node": "Get Notebook ID", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Notebook": {
+      "main": [[{ "node": "Get Notebook ID", "type": "main", "index": 0 }]]
+    },
+    "Get Notebook ID": {
+      "main": [[{ "node": "Save Transcript to Notebook", "type": "main", "index": 0 }]]
+    },
+    "Save Transcript to Notebook": {
+      "main": [[{ "node": "Save Success?", "type": "main", "index": 0 }]]
+    },
+    "Save Success?": {
+      "main": [
+        [{ "node": "Mark Completed", "type": "main", "index": 0 }],
+        [{ "node": "Mark Notebook Error", "type": "main", "index": 0 }]
+      ]
+    }
   },
   "settings": {
     "executionOrder": "v1",

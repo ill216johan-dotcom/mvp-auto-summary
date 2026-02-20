@@ -17,6 +17,7 @@ services:
       - n8n_data:/home/node/.n8n
       - /mnt/recordings:/recordings:ro           # NFS mount (read-only)
       - ./scripts:/scripts:ro                     # Helper scripts
+      - /usr/local/bin/ffmpeg:/usr/bin/ffmpeg:ro   # static ffmpeg (musl-compatible, установлен на хосте)
     environment:
       # --- Core ---
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -62,7 +63,7 @@ services:
       - GLM4_MODEL=${GLM4_MODEL:-glm-4.7-flashx}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - OPEN_NOTEBOOK_URL=http://open-notebook:8888
+      - OPEN_NOTEBOOK_URL=http://open-notebook:5055
       - OPEN_NOTEBOOK_TOKEN=${OPEN_NOTEBOOK_TOKEN:-password}
     depends_on:
       postgres:
@@ -99,12 +100,12 @@ services:
   # API: POST http://localhost:9000/asr (multipart file upload)
   # ============================================================
   whisper:
-    image: onerahmet/openai-whisper-asr-webservice:latest-cpu
+    image: onerahmet/openai-whisper-asr-webservice:v1.4.0
     restart: unless-stopped
     ports:
       - "${WHISPER_PORT:-9000}:9000"
     environment:
-      - ASR_MODEL=${WHISPER_MODEL:-medium}
+      - ASR_MODEL=${WHISPER_MODEL:-small}
       - ASR_ENGINE=faster_whisper
     volumes:
       - whisper_cache:/root/.cache/huggingface

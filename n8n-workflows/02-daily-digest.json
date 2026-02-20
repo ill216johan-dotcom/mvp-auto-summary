@@ -61,14 +61,14 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.GLM4_BASE_URL || 'https://api.z.ai/api/paas/v4') + '/chat/completions' }}",
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.GLM4_MODEL || 'glm-4.7-flashx', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Сформируй ежедневный дайджест по стенограммам встреч. Формат: 1) Краткое резюме дня (3-5 предложений). 2) Ключевые договоренности (буллеты). 3) Action items (буллеты с ответственным, если есть). 4) Риски/блокеры (буллеты или Нет). 5) Клиенты/LEAD: перечисли LEAD-ID, по каждому 1-2 ключевых пункта. Ограничение: до 3500 символов.' }, { role: 'user', content: $json.combined } ], temperature: 0.2, max_tokens: 1400, stream: false }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Сформируй ежедневный дайджест по стенограммам встреч. Формат: 1) Краткое резюме дня (3-5 предложений). 2) Ключевые договоренности (буллеты). 3) Action items (буллеты с ответственным, если есть). 4) Риски/блокеры (буллеты или Нет). 5) Клиенты/LEAD: перечисли LEAD-ID, по каждому 1-2 ключевых пункта. Ограничение: до 3500 символов.' }, { role: 'user', content: $json.combined } ], temperature: 0.2, max_tokens: 1400, stream: false, thinking: { type: 'disabled' } }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
+            { "name": "Authorization", "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6" },
             { "name": "Content-Type", "value": "application/json" }
           ]
         },
@@ -82,7 +82,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst content = ($json.choices && $json.choices[0] && $json.choices[0].message && $json.choices[0].message.content) ? $json.choices[0].message.content : '';\nconst summaryText = content.trim() || 'Сводка не получена.';\nconst leadList = Array.isArray(meta.leadIds) && meta.leadIds.length > 0 ? meta.leadIds.map((id) => `LEAD-${id}`).join(', ') : '—';\nconst header = `Ежедневный дайджест за ${meta.dateLabel}\\nВстреч: ${meta.count}\\nКлиенты: ${leadList}`;\nconst digest = `${header}\\n\\n${summaryText}`.trim();\n\nreturn [{\n  json: {\n    digest,\n    summaryText,\n    rowIds: meta.rowIds\n  }\n}];"
+        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst glmResponse = $json;\n\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst rawReasoning = (msg.reasoning_content || '').trim();\nconst content = rawContent || rawReasoning || 'Сводка не получена.';\n\nconst leadList = Array.isArray(meta.leadIds) && meta.leadIds.length > 0 ? meta.leadIds.map((id) => `LEAD-${id}`).join(', ') : '—';\nconst header = `Ежедневный дайджест за ${meta.dateLabel}\\nВстреч: ${meta.count}\\nКлиенты: ${leadList}`;\nconst digest = `${header}\\n\\n${content}`.trim();\n\nreturn [{\n  json: {\n    digest,\n    summaryText: content,\n    rowIds: meta.rowIds\n  }\n}];"
       },
       "id": "build-digest",
       "name": "Build Digest",
@@ -103,11 +103,11 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: $json.text, disable_web_page_preview: true }) }}",
-        "options": { "timeout": 120000 }
+        "jsonBody": "={{ JSON.stringify({ chat_id: -1003872092456, text: $json.text, disable_web_page_preview: true }) }}",
+        "options": { "timeout": 60000 }
       },
       "id": "send-telegram",
       "name": "Send Telegram",
