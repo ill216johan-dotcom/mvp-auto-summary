@@ -1,0 +1,254 @@
+{
+  "name": "03 — Individual Summaries (Calls + Chats)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 22 * * *" }]
+        }
+      },
+      "id": "trigger-22",
+      "name": "Daily 22:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, filename, lead_id, transcript_text, created_at::date as call_date FROM processed_files WHERE status = 'completed' AND DATE(created_at) = CURRENT_DATE AND transcript_text IS NOT NULL ORDER BY lead_id, created_at",
+        "options": {}
+      },
+      "id": "load-calls",
+      "name": "Load Today's Calls",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, -100],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT lead_id, chat_title, STRING_AGG('[' || TO_CHAR(message_date, 'HH24:MI') || '] ' || sender || ': ' || message_text, E'\\n' ORDER BY message_date) as chat_text, COUNT(*) as msg_count, MIN(message_date) as first_msg, MAX(message_date) as last_msg FROM chat_messages WHERE DATE(message_date) = CURRENT_DATE GROUP BY lead_id, chat_title ORDER BY lead_id",
+        "options": {}
+      },
+      "id": "load-chats",
+      "name": "Load Today's Chats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 100],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const calls = $input.all();\nconst results = [];\n\nfor (const call of calls) {\n  const { id, filename, lead_id, transcript_text, call_date } = call.json;\n  \n  const timeParts = filename.match(/_(\\d{2}-\\d{2})\\./)?.[1] || '00-00';\n  \n  const truncated = transcript_text.length > 80000 ? transcript_text.slice(0, 80000) + '\\n...[обрезано]' : transcript_text;\n  \n  results.push({\n    json: {\n      type: 'call',\n      lead_id: String(lead_id),\n      source_id: id,\n      filename,\n      time_str: timeParts,\n      content: truncated,\n      call_date\n    }\n  });\n}\n\nreturn results.length > 0 ? results : [{ json: { type: 'call', lead_id: null, empty: true } }];"
+      },
+      "id": "prep-calls",
+      "name": "Prepare Calls",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, -100]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const chats = $input.all();\nconst results = [];\n\nfor (const chat of chats) {\n  const { lead_id, chat_title, chat_text, msg_count } = chat.json;\n  \n  const truncated = (chat_text || '').length > 50000 ? chat_text.slice(0, 50000) + '\\n...[обрезано]' : (chat_text || '');\n  \n  results.push({\n    json: {\n      type: 'chat',\n      lead_id: String(lead_id),\n      chat_title,\n      msg_count,\n      content: truncated\n    }\n  });\n}\n\nreturn results.length > 0 ? results : [{ json: { type: 'chat', lead_id: null, empty: true } }];"
+      },
+      "id": "prep-chats",
+      "name": "Prepare Chats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "not-empty-call",
+              "leftValue": "={{ $json.empty }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ],
+          "combinator": "any"
+        }
+      },
+      "id": "if-call-empty",
+      "name": "Has Calls?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, -100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "not-empty-chat",
+              "leftValue": "={{ $json.empty }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ],
+          "combinator": "any"
+        }
+      },
+      "id": "if-chat-empty",
+      "name": "Has Chats?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Проанализируй транскрипцию созвона с клиентом.\\n\\nВЫХОДНОЙ ФОРМАТ (строго):\\n\\n## Краткое резюме\\n[2-3 предложения о главном]\\n\\n## Участники\\n- Менеджер: [имя]\\n- Клиент: [компания/имя]\\n\\n## Ключевые договорённости\\n- [пункт]\\n\\n## Action Items\\n- [ ] [задача] — [ответственный] — [дедлайн]\\n\\n## Риски и блокеры\\n- [риск или Нет]\\n\\n## Следующие шаги\\n- [что делать дальше]\\n\\n## Важные цитаты клиента\\n> [цитата или нет цитат]' }, { role: 'user', content: $json.content } ], temperature: 0.2, max_tokens: 1500, stream: false, thinking: { type: 'disabled' } }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "glm-call-summary",
+      "name": "GLM-4: Summarize Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Проанализируй историю переписки с клиентом в Telegram.\\n\\nВЫХОДНОЙ ФОРМАТ (строго):\\n\\n## Период общения\\n[даты первой и последней переписки]\\n\\n## Основные темы\\n- [тема]\\n\\n## Ключевые договорённости\\n- [пункт или Не зафиксировано]\\n\\n## Open questions (вопросы без ответа)\\n- [вопрос или Нет]\\n\\n## Тон клиента\\n[позитивный/нейтральный/негативный + причины]\\n\\n## Следующие шаги\\n- [что нужно сделать]' }, { role: 'user', content: $json.content } ], temperature: 0.2, max_tokens: 1200, stream: false, thinking: { type: 'disabled' } }) }}",
+        "options": { "timeout": 120000 }
+      },
+      "id": "glm-chat-summary",
+      "name": "GLM-4: Summarize Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const glmResponse = $json;\nconst prevItem = $('Prepare Calls').item.json;\n\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst rawReasoning = (msg.reasoning_content || '').trim();\nconst summaryText = rawContent || rawReasoning || 'Summary не получено.';\n\nconst dateStr = new Date().toISOString().slice(0, 10);\nconst filename = `LEAD-${prevItem.lead_id}_call_${prevItem.time_str}_${dateStr}.md`;\n\nreturn {\n  json: {\n    type: 'call',\n    lead_id: prevItem.lead_id,\n    source_id: prevItem.source_id,\n    summary_text: summaryText,\n    filename,\n    summary_date: dateStr\n  }\n};"
+      },
+      "id": "extract-call-summary",
+      "name": "Extract Call Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -200]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const glmResponse = $json;\nconst prevItem = $('Prepare Chats').item.json;\n\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst rawReasoning = (msg.reasoning_content || '').trim();\nconst summaryText = rawContent || rawReasoning || 'Summary не получено.';\n\nconst dateStr = new Date().toISOString().slice(0, 10);\nconst filename = `LEAD-${prevItem.lead_id}_chat_${dateStr}.md`;\n\nreturn {\n  json: {\n    type: 'chat',\n    lead_id: prevItem.lead_id,\n    source_id: 0,\n    summary_text: summaryText,\n    filename,\n    summary_date: dateStr\n  }\n};"
+      },
+      "id": "extract-chat-summary",
+      "name": "Extract Chat Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO client_summaries (lead_id, source_type, source_id, summary_text, summary_date) VALUES ($1, $2, $3, $4, $5::date)",
+        "options": {
+          "queryReplacement": "={{ $json.lead_id }}||={{ $json.type }}||={{ $json.source_id }}||={{ $json.summary_text.replace(/'/g, \"''\") }}||={{ $json.summary_date }}"
+        }
+      },
+      "id": "save-call-summary-db",
+      "name": "Save Call Summary to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, -200],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO client_summaries (lead_id, source_type, source_id, summary_text, summary_date) VALUES ($1, $2, $3, $4, $5::date)",
+        "options": {
+          "queryReplacement": "={{ $json.lead_id }}||={{ $json.type }}||={{ $json.source_id }}||={{ $json.summary_text.replace(/'/g, \"''\") }}||={{ $json.summary_date }}"
+        }
+      },
+      "id": "save-chat-summary-db",
+      "name": "Save Chat Summary to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 0],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    }
+  ],
+  "connections": {
+    "Daily 22:00": {
+      "main": [[
+        { "node": "Load Today's Calls", "type": "main", "index": 0 },
+        { "node": "Load Today's Chats", "type": "main", "index": 0 }
+      ]]
+    },
+    "Load Today's Calls": {
+      "main": [[{ "node": "Prepare Calls", "type": "main", "index": 0 }]]
+    },
+    "Load Today's Chats": {
+      "main": [[{ "node": "Prepare Chats", "type": "main", "index": 0 }]]
+    },
+    "Prepare Calls": {
+      "main": [[{ "node": "Has Calls?", "type": "main", "index": 0 }]]
+    },
+    "Prepare Chats": {
+      "main": [[{ "node": "Has Chats?", "type": "main", "index": 0 }]]
+    },
+    "Has Calls?": {
+      "main": [
+        [],
+        [{ "node": "GLM-4: Summarize Call", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Chats?": {
+      "main": [
+        [],
+        [{ "node": "GLM-4: Summarize Chat", "type": "main", "index": 0 }]
+      ]
+    },
+    "GLM-4: Summarize Call": {
+      "main": [[{ "node": "Extract Call Summary", "type": "main", "index": 0 }]]
+    },
+    "GLM-4: Summarize Chat": {
+      "main": [[{ "node": "Extract Chat Summary", "type": "main", "index": 0 }]]
+    },
+    "Extract Call Summary": {
+      "main": [[{ "node": "Save Call Summary to DB", "type": "main", "index": 0 }]]
+    },
+    "Extract Chat Summary": {
+      "main": [[{ "node": "Save Chat Summary to DB", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Moscow"
+  },
+  "staticData": null,
+  "tags": [{ "name": "MVP Auto-Summary" }],
+  "triggerCount": 1
+}
