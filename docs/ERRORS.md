@@ -47,35 +47,57 @@ curl http://localhost:8000/health
 
 ## Pipeline Errors
 
-### E010: Whisper — `audio_file is required`
+### ~~E010: Whisper — `audio_file is required`~~ (УСТАРЕЛО — Whisper не используется)
 
-**Symptom**: Whisper возвращает 422 или `{"detail":"audio_file is required"}`  
-**Root Cause**: n8n HTTP Request не отправляет бинарный файл (нет Read Binary File или неверный inputDataFieldName)  
-**Fix**:
-1. Добавить ноду **Read Binary File** перед Whisper
-2. В HTTP Request выставить `multipart-form-data`
-3. Параметр `formBinaryData` → name: `audio_file`, inputDataFieldName: `data`
+> ℹ️ Этот раздел относился к self-hosted Whisper STT. Проект использует **Яндекс SpeechKit**.
 
 ---
 
-### E011: Whisper — контейнер падает (OOM)
+### ~~E011: Whisper — контейнер падает (OOM)~~ (УСТАРЕЛО — Whisper не используется)
 
-**Symptom**: `whisper` контейнер перезапускается, в логах `Killed` или OOM  
-**Root Cause**: Модель слишком тяжёлая для RAM VPS  
-**Fix**:
-1. Поменять `WHISPER_MODEL` на `small` или `medium`
-2. Увеличить RAM VPS до 8–16 GB
+> ℹ️ Этот раздел относился к self-hosted Whisper STT. Проект использует **Яндекс SpeechKit**.
 
 ---
 
-### E012: Whisper — timeout при длинных файлах
+### ~~E012: Whisper — timeout при длинных файлах~~ (УСТАРЕЛО — Whisper не используется)
 
-**Symptom**: HTTP Request к Whisper падает по таймауту  
-**Root Cause**: Длинный файл + слабый CPU или короткий timeout в ноде  
+> ℹ️ Этот раздел относился к self-hosted Whisper STT. Проект использует **Яндекс SpeechKit**.
+
+---
+
+### E010-NEW: SpeechKit — `401 Unauthorized` при запросе транскрипции
+
+**Symptom**: POST к `transcribe.api.cloud.yandex.net` возвращает 401  
+**Root Cause**: Неверный или просроченный YANDEX_API_KEY  
 **Fix**:
-1. Увеличить timeout в HTTP Request (например, 600000)
-2. Использовать более лёгкую модель (`small`/`medium`)
-3. При необходимости — разбить файл на части
+1. Проверить ключ в Яндекс Облаке → IAM → Service Accounts
+2. Создать новый API-ключ если старый просрочен
+3. Обновить переменную окружения в docker-compose.yml
+
+---
+
+### E011-NEW: SpeechKit — операция зависла в статусе `RUNNING`
+
+**Symptom**: Polling getOperation возвращает `done: false` бесконечно, транскрипция не завершается  
+**Root Cause**: Яндекс SpeechKit перегружен или файл слишком большой  
+**Диагностика**:
+```bash
+# Проверить статус вручную
+curl -H "Authorization: Api-Key ВАШ_КЛЮЧ" \
+  "https://operation.api.cloud.yandex.net/operations/OPERATION_ID"
+```
+**Fix**:
+1. Подождать 10-15 минут — SpeechKit может медленно обрабатывать
+2. Если операция висит >30 мин — удалить запись из processed_files и повторить
+3. Для очень длинных файлов (>2 часа) — разбить на части
+
+---
+
+### E012-NEW: SpeechKit — `413 Request Entity Too Large` при загрузке в S3
+
+**Symptom**: Загрузка файла в Яндекс Object Storage завершается с ошибкой 413  
+**Root Cause**: Файл превышает лимиты однократной загрузки (5 GB для single-part)  
+**Fix**: Использовать multipart upload для файлов >5 GB (редкий случай)
 
 ---
 
@@ -439,23 +461,13 @@ docker compose logs open-notebook --tail=8
 
 ---
 
-### E036: Тестовый WAV из случайного шума — Whisper возвращает пустой текст или музыку
+### ~~E036: Тестовый WAV из случайного шума — Whisper возвращает пустой текст~~ (УСТАРЕЛО — Whisper не используется)
 
-**Symptom**: Workflow 01 выполняется успешно (Mark Completed), но в open-notebook транскрипт пустой или содержит `[СПОКОЙНАЯ МУЗЫКА]` / `[Тихая музыка]`.
-
-**Root Cause**: Тестовый файл создан из `/dev/urandom` или синусоиды — это не речь. Whisper правильно распознаёт что речи нет.
-
-**Fix**: Для полноценного теста pipeline нужен файл с реальной речью:
-```bash
-# На сервере — скачать тестовый файл с речью на русском
-mkdir -p /mnt/recordings/2026/02/18
-cd /tmp
-wget -q "https://www2.cs.uic.edu/~i101/SoundFiles/gettysburg10.wav" -O test_speech.wav 2>/dev/null || \
-  dd if=/dev/urandom bs=96000 count=1 > /mnt/recordings/2026/02/18/88888_2026-02-18_10-00.wav
-```
-Или использовать реальную запись созвона.
-
-**Важно**: Даже с пустым транскриптом pipeline работает корректно — нода "Has Transcript?" проверяет наличие текста и направляет в "Mark Error" при пустом результате. Это ожидаемое поведение, не баг.
+> ℹ️ Этот раздел относился к self-hosted Whisper STT. Проект использует **Яндекс SpeechKit**.
+>
+> Актуальная ситуация для SpeechKit: если передать файл без речи, SpeechKit вернёт пустой массив chunks. Нода Extract Transcript получит пустую строку → нода "Has Transcript?" направит в "Mark Error". Это ожидаемое поведение, не баг.
+>
+> Для реального теста используйте реальные WebM-файлы созвонов из `/mnt/recordings/`.
 
 ---
 
@@ -719,4 +731,171 @@ INSERT INTO processed_files (filename, filepath, lead_id, status, ...) VALUES ('
 
 ---
 
-*Document created: 2026-02-18 | Updated: 2026-02-19 — added E043 (GLM thinking mode), E044 (Load Today stops), E045 (filepath NOT NULL)*
+---
+
+### E046: Save Success? всегда FALSE — неправильная проверка undefined
+
+**Symptom**: Workflow 01 останавливается на ноде "Mark Notebook Error" даже когда open-notebook успешно сохранил транскрипт.
+
+**Root Cause**: Нода `Save Success?` проверяет `$json.error == ""`. Но при успешном ответе open-notebook поле `error` отсутствует — `$json.error` возвращает `undefined`. В JavaScript `undefined == ""` — это `false`, поэтому workflow идёт в FALSE ветку.
+
+**Диагностика**:
+```bash
+# Проверить что open-notebook возвращает успешный ответ
+docker logs mvp-auto-summary-open-notebook-1 --tail=50
+```
+
+**Fix**: Изменить условие в ноде `Save Success?`:
+```javascript
+// БЫЛО (неправильно):
+leftValue: "={{ $json.error }}"
+operator: "equals"
+rightValue: ""
+
+// СТАЛО (правильно):
+leftValue: "={{ $json.id || $json.source_id || $json.command_id }}"
+operator: "notEmpty"
+```
+
+Проверяем наличие `id` в ответе — признак успешного создания source.
+
+---
+
+### E047: 404 Not Found при сохранении в open-notebook
+
+**Symptom**: Нода "Save Transcript to Notebook" возвращает 404:
+```
+"message": "404 - \"{\"detail\":\"Not Found\"}\""
+```
+
+**Root Cause**: Неправильный URL endpoint'а. Было несколько вариантов:
+- `/api/sources/{notebookId}/entries` — НЕ СУЩЕСТВУЕТ
+- `/api/sources//entries` — НЕ СУЩЕСТВУЕТ (пустой notebookId)
+- `/api/sources/json` — ПРАВИЛЬНЫЙ
+
+**Правильный URL**:
+```
+http://open-notebook:5055/api/sources/json
+```
+
+**Важно:** Порт 5055 — это внутренний порт API контейнера. Порт 8888 — это Web UI.
+
+**Fix**: В ноде "Save Transcript to Notebook":
+1. URL: `http://open-notebook:5055/api/sources/json` (Fixed, не Expression!)
+2. Body: Expression с `JSON.stringify({...})`
+
+---
+
+### E048: "JSON parameter needs to be valid JSON"
+
+**Symptom**: Нода возвращает ошибку:
+```
+"error": "JSON parameter needs to be valid JSON"
+```
+
+**Root Cause**: В n8n поле JSON Body заполнено как plain JSON, но содержит выражения `{{ ... }}`. n8n не может их распарсить.
+
+**Fix**: Переключить JSON Body в режим **Expression** и использовать `JSON.stringify()`:
+```javascript
+{{ JSON.stringify({ 
+  notebooks: [$json.notebookId], 
+  type: "text", 
+  content: $('Extract Transcript').first().json.transcript 
+}) }}
+```
+
+---
+
+### E049: Workflow не обновляется после копирования файла
+
+**Symptom**: Копируешь `.json` файл через WinSCP, но workflow в n8n не меняется.
+
+**Root Cause**: n8n хранит workflows в PostgreSQL, НЕ в файлах! Копирование файла на диск ничего не даёт.
+
+**Fix**: Обновлять workflow через n8n UI:
+1. Открыть workflow
+2. **⋮** → Import from File
+3. Или редактировать ноды вручную
+4. **Save!**
+
+**См. также:** `docs/N8N_WORKFLOW_UPDATE.md`
+
+---
+
+### E050: "Wrong type: ... is an object but was expecting a string"
+
+**Symptom**: IF нода падает с ошибкой типа:
+```
+Wrong type: 'AxiosError: 404...' is an object but was expecting a string
+```
+
+**Root Cause**: При ошибке HTTP запроса n8n возвращает объект ошибки в поле `error`. IF нода пытается сравнить его как строку.
+
+**Fix**: Проверять наличие `id` через `.length`:
+```javascript
+// НЕПРАВИЛЬНО:
+leftValue: "={{ $json.id }}"
+operator: "notEmpty"  // ошибка если $json.error — объект!
+
+// ПРАВИЛЬНО:
+leftValue: "={{ ($json.id || '').length }}"
+operator: "gt"
+rightValue: 0
+```
+
+---
+
+---
+
+### E051: SpeechKit — chunks пустые, транскрипт пустой
+
+**Symptom**: Workflow 01 завершается с `status='error'`, в логах видно что SpeechKit вернул `done: true` но текст пустой.
+
+**Root Cause**: Файл содержит только тишину, фоновый шум или нераспознанную речь.
+
+**Диагностика**:
+```bash
+# Проверить что файл содержит речь (должна быть ненулевая длина)
+docker exec mvp-auto-summary-n8n-1 ls -la /recordings/2026/02/20/
+```
+
+**Fix**: Использовать реальные записи созвонов. Workflow корректно обрабатывает этот случай — помечает файл как error и не добавляет в дайджест.
+
+---
+
+### E052: Дублирующиеся ноутбуки в open-notebook для одного LEAD_ID
+
+**Symptom**: В open-notebook UI видно несколько ноутбуков с одинаковым именем `LEAD-XXXXXX`.
+
+**Root Cause**: Нода "Find Client Notebook" использовала `$input.first()` вместо `$input.all()`. При каждом запуске создавала новый ноутбук вместо поиска существующего.
+
+**Fix** (уже исправлено в WF01):
+```javascript
+// БЫЛО (неправильно):
+const notebooks = $input.first().json;
+
+// СТАЛО (правильно):
+const allNotebooks = $input.all();
+const notebooks = allNotebooks.map(item => item.json);
+```
+
+**Если дубликаты уже созданы**: удалить лишние ноутбуки вручную через open-notebook UI (`http://84.252.100.93:8888`).
+
+---
+
+### E053: open-notebook UI — красная плашка "Ключ шифрования не настроен"
+
+**Symptom**: При открытии `http://84.252.100.93:8888` в верхней части UI красная плашка с предупреждением о ключе шифрования.
+
+**Root Cause**: Переменная `OPEN_NOTEBOOK_ENCRYPTION_KEY` не задана в docker-compose.yml.
+
+**Fix** (уже применено):
+```yaml
+# В docker-compose.yml, секция open-notebook environment:
+- OPEN_NOTEBOOK_ENCRYPTION_KEY=a4f9fe1e61e6464b2f020d235f1d78548912503d767ccb2e797c744661852796
+```
+После добавления: `docker compose up -d --force-recreate open-notebook`
+
+---
+
+*Document created: 2026-02-18 | Updated: 2026-02-22 — E010-E012 помечены как устаревшие (Whisper→SpeechKit), E036 помечен устаревшим, добавлены E051-E053 (SpeechKit, дубликаты ноутбуков, encryption key)*
