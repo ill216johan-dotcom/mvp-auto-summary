@@ -68,11 +68,11 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
             { "name": "Content-Type", "value": "application/json" }
           ]
         },
-        "options": { "timeout": 180000 }
+        "options": { "timeout": 180000, "retry": { "enabled": true, "maxRetries": 3, "waitBetweenRetries": 5000 } }
       },
       "id": "glm-summarize",
       "name": "GLM-4 Summarize",
@@ -103,7 +103,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ chat_id: -1003872092456, text: $json.text, disable_web_page_preview: true }) }}",
@@ -118,7 +118,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const meta = $('Build Digest').first().json;\nconst rowIds = Array.isArray(meta.rowIds) ? meta.rowIds : [];\nconst rowIdsSql = rowIds.length > 0 ? rowIds.join(',') : '-1';\nconst summaryEscaped = (meta.summaryText || '').replace(/'/g, \"''\");\n\nreturn [{\n  json: {\n    rowIdsSql,\n    summaryEscaped\n  }\n}];"
+        "jsCode": "const meta = $('Build Digest').first().json;\nconst rowIds = Array.isArray(meta.rowIds) ? meta.rowIds : [];\nconst summaryText = meta.summaryText || '';\nreturn [{ json: { rowIds, summaryText } }];"
       },
       "id": "collapse-chunks",
       "name": "Collapse Chunks",
@@ -129,8 +129,8 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "UPDATE processed_files SET summary_text = '{{ $json.summaryEscaped }}', summary_sent = true WHERE id IN ({{ $json.rowIdsSql }})",
-        "options": {}
+        "query": "UPDATE processed_files SET summary_text = $1, summary_sent = true WHERE id = ANY($2::int[])",
+        "options": { "queryReplacement": "={{ $json.summaryText }}||={{ '{' + ($json.rowIds || []).join(',') + '}' }}" }
       },
       "id": "mark-summary-sent",
       "name": "Mark Summary Sent",

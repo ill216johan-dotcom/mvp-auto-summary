@@ -1,0 +1,284 @@
+{
+  "name": "05 — Prompt Tester (тестирование промптов)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "prompt-field",
+              "name": "prompt_text",
+              "value": "Ты бизнес-аналитик. Проанализируй транскрипцию созвона с клиентом.\n\nВЫХОДНОЙ ФОРМАТ (строго):\n\n## Краткое резюме\n[2-3 предложения о главном]\n\n## Участники\n- Менеджер: [имя]\n- Клиент: [компания/имя]\n\n## Ключевые договорённости\n- [пункт]\n\n## Action Items\n- [ ] [задача] — [ответственный] — [дедлайн]\n\n## Риски и блокеры\n- [риск или Нет]\n\n## Следующие шаги\n- [что делать дальше]\n\n## Важные цитаты клиента\n> [цитата или нет цитат]",
+              "type": "string"
+            },
+            {
+              "id": "lead-field",
+              "name": "test_lead_id",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "save-field",
+              "name": "save_as",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-prompt",
+      "name": "Set Test Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "notes": "РЕДАКТИРУЙ ЗДЕСЬ:\n\n🔑 save_as — КАКОЙ ПРОМПТ ТЕСТИРУЕШЬ (указать одно из):\n  call_summary_prompt  — саммари созвона → в open-notebook (WF03) ⬅ НАЧНИ С ЭТОГО\n  chat_summary_prompt  — саммари Telegram-чата (WF03)\n  report_prompt        — отчёт по /report (WF04)\n  digest_prompt        — ежедневный дайджест (WF02)\n\n📝 prompt_text — вставь новый промпт сюда\n\n🎯 test_lead_id — LEAD ID клиента (оставь пустым — возьмёт последний транскрипт)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Берём транскрипт — либо указанного клиента, либо последний доступный\nconst leadId = $json.test_lead_id;\nconst query = leadId\n  ? `SELECT transcript_text, lead_id, filename FROM processed_files WHERE lead_id = '${leadId}' AND transcript_text IS NOT NULL ORDER BY created_at DESC LIMIT 1`\n  : `SELECT transcript_text, lead_id, filename FROM processed_files WHERE transcript_text IS NOT NULL ORDER BY created_at DESC LIMIT 1`;\n\n// Передаём запрос дальше\nreturn [{ json: { ...($json), sql_query: query } }];"
+      },
+      "id": "prepare-query",
+      "name": "Prepare Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql_query }}",
+        "options": {}
+      },
+      "id": "load-transcript",
+      "name": "Load Transcript",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        660,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst promptData = $('Set Test Prompt').first().json;\nconst transcript = items[0]?.json?.transcript_text || '';\nconst leadId = items[0]?.json?.lead_id || 'не найден';\nconst filename = items[0]?.json?.filename || '—';\n\nif (!transcript) {\n  return [{ json: {\n    status: 'ОШИБКА',\n    message: 'Транскрипт не найден. Убедись что в базе есть обработанные файлы.',\n    lead_id: leadId\n  }}];\n}\n\nconst systemPrompt = promptData.prompt_text || 'Сделай краткое саммари.';\nconst MAX = 40000;\nconst truncated = transcript.length > MAX;\nconst combined = truncated ? transcript.slice(0, MAX) + '\n...[обрезано]' : transcript;\n\nreturn [{ json: {\n  systemPrompt,\n  combined,\n  lead_id: leadId,\n  filename,\n  chars: transcript.length,\n  truncated\n}}];"
+      },
+      "id": "check-prepare",
+      "name": "Check & Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.combined }], temperature: 0.3, max_tokens: 2000, stream: false, thinking: { type: 'disabled' } }) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "id": "glm-test",
+      "name": "GLM-4 Test Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        0
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const glmResp = $json;\nconst msg = glmResp.choices && glmResp.choices[0] ? glmResp.choices[0].message : {};\nconst content = (msg.content || msg.reasoning_content || '').trim() || 'Ответ не получен.';\nconst meta = $('Check & Prepare').first().json;\n\nreturn [{ json: {\n  '=== РЕЗУЛЬТАТ ПРОМПТА ===': content,\n  '--- МЕТА ---': {\n    клиент: 'LEAD-' + meta.lead_id,\n    файл: meta.filename,\n    символов_в_транскрипте: meta.chars,\n    обрезан: meta.truncated,\n    длина_ответа: content.length\n  }\n}}];"
+      },
+      "id": "show-result",
+      "name": "Show Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Сохраняем промпт в таблицу prompts под именем которое указал пользователь\n// Если имя не указано — сохраняем как 'test_draft'\nconst promptName = $('Set Test Prompt').first().json.save_as || 'test_draft';\nconst promptText = $('Set Test Prompt').first().json.prompt_text || '';\nconst glmResp = $json;\nconst msg = glmResp.choices && glmResp.choices[0] ? glmResp.choices[0].message : {};\nconst result = (msg.content || '').trim();\n\nreturn [{ json: {\n  prompt_name: promptName,\n  prompt_text: promptText,\n  last_result: result.slice(0, 500) + (result.length > 500 ? '...' : '')\n}}];"
+      },
+      "id": "prepare-save",
+      "name": "Prepare Save",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS prompts (  name VARCHAR(100) PRIMARY KEY,  prompt_text TEXT NOT NULL,  last_result TEXT,  updated_at TIMESTAMP DEFAULT NOW());INSERT INTO prompts (name, prompt_text, last_result, updated_at)  VALUES ($1, $2, $3, NOW())  ON CONFLICT (name) DO UPDATE    SET prompt_text = EXCLUDED.prompt_text,        last_result = EXCLUDED.last_result,        updated_at = NOW();SELECT name, updated_at, LEFT(prompt_text, 80) as preview FROM prompts WHERE name = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.prompt_name }}||={{ $json.prompt_text }}||={{ $json.last_result }}"
+        }
+      },
+      "id": "save-to-db",
+      "name": "Save Prompt to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1760,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "F3beGLVPdqgBpqlv",
+          "name": "PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Test Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Test Prompt": {
+      "main": [
+        [
+          {
+            "node": "Prepare Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Query": {
+      "main": [
+        [
+          {
+            "node": "Load Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Transcript": {
+      "main": [
+        [
+          {
+            "node": "Check & Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check & Prepare": {
+      "main": [
+        [
+          {
+            "node": "GLM-4 Test Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GLM-4 Test Call": {
+      "main": [
+        [
+          {
+            "node": "Show Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show Result": {
+      "main": [
+        [
+          {
+            "node": "Prepare Save",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Save": {
+      "main": [
+        [
+          {
+            "node": "Save Prompt to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Moscow"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "MVP Auto-Summary"
+    }
+  ]
+}
