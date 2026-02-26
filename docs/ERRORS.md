@@ -47,35 +47,35 @@ curl http://localhost:8000/health
 
 ## Pipeline Errors
 
-### E010: Whisper — `audio_file is required`
+### E010: transcribe — `YANDEX_API_KEY is not set`
 
-**Symptom**: Whisper возвращает 422 или `{"detail":"audio_file is required"}`  
-**Root Cause**: n8n HTTP Request не отправляет бинарный файл (нет Read Binary File или неверный inputDataFieldName)  
+**Symptom**: `POST /` или `/health` возвращает 500 с `YANDEX_API_KEY is not set`  
+**Root Cause**: В `.env` не задан `YANDEX_API_KEY` или контейнер не перечитал env  
 **Fix**:
-1. Добавить ноду **Read Binary File** перед Whisper
-2. В HTTP Request выставить `multipart-form-data`
-3. Параметр `formBinaryData` → name: `audio_file`, inputDataFieldName: `data`
+1. Добавить `YANDEX_API_KEY` в `.env`
+2. Перезапустить transcribe: `docker compose up -d --build transcribe`
 
 ---
 
-### E011: Whisper — контейнер падает (OOM)
+### E011: transcribe — `file not found`
 
-**Symptom**: `whisper` контейнер перезапускается, в логах `Killed` или OOM  
-**Root Cause**: Модель слишком тяжёлая для RAM VPS  
+**Symptom**: `POST /` возвращает `{ "error": "not found" }`  
+**Root Cause**: путь к файлу не существует внутри контейнера (NFS не смонтирован / неверный путь)  
 **Fix**:
-1. Поменять `WHISPER_MODEL` на `small` или `medium`
-2. Увеличить RAM VPS до 8–16 GB
+1. Проверь, что файл реально есть в `/mnt/recordings/...`
+2. В n8n отправляй `filepath` в формате `/recordings/...` (transcribe маппит на `/mnt/recordings/...`)
+3. Убедись, что volume примонтирован в `docker-compose.yml`
 
 ---
 
-### E012: Whisper — timeout при длинных файлах
+### E012: transcribe — долго в `processing`
 
-**Symptom**: HTTP Request к Whisper падает по таймауту  
-**Root Cause**: Длинный файл + слабый CPU или короткий timeout в ноде  
+**Symptom**: `/check` долго возвращает `transcript: null`  
+**Root Cause**: SpeechKit медленно обрабатывает длинный файл или достигнуты лимиты  
 **Fix**:
-1. Увеличить timeout в HTTP Request (например, 600000)
-2. Использовать более лёгкую модель (`small`/`medium`)
-3. При необходимости — разбить файл на части
+1. Подождать 2–5 минут и повторить `/check`
+2. Проверить логи transcribe (`docker compose logs -f transcribe`)
+3. Если часто — уменьшить длину чанков / пересмотреть лимиты SpeechKit
 
 ---
 
@@ -90,7 +90,7 @@ curl http://localhost:8000/health
 ### E014: GLM-4 API timeout
 
 **Symptom**: HTTP Request к GLM-4 падает по таймауту  
-**Root Cause**: Длинный транскрипт (>50K tokens) или проблемы с API z.ai  
+**Root Cause**: Длинный транскрипт (>50K tokens) или проблемы с API `open.bigmodel.cn`  
 **Fix**:
 1. Увеличить timeout в n8n HTTP Request node до 120 секунд
 2. Если транскрипт >100K tokens — разбить на части
@@ -134,6 +134,17 @@ mount -a
 **Symptom**: Один и тот же файл транскрибируется повторно  
 **Root Cause**: Запись в processed_files не была создана (или PostgreSQL был недоступен)  
 **Fix**: Workflow должен СНАЧАЛА записать файл в PostgreSQL (status='transcribing'), ЗАТЕМ начинать обработку. Проверить порядок нод в Workflow 1.
+
+---
+
+### E018: n8n остановился — "No output data returned"
+
+**Symptom**: В execution видно сообщение: "n8n stops executing the workflow when a node has no output data"  
+**Root Cause**: Нода вернула 0 строк (это НЕ ошибка). Например, в WF02 за сегодня нет записей или `summary_sent` был NULL.  
+**Fix**:
+1. Это нормальное поведение, если данных нет
+2. Если нужно продолжать цепочку при пустом результате — включить **Settings → Always Output Data** для конкретной ноды
+3. Если `summary_sent` = NULL, выполнить: `UPDATE processed_files SET summary_sent=false WHERE summary_sent IS NULL;`
 
 ---
 
@@ -438,6 +449,10 @@ docker compose logs open-notebook --tail=8
 ```
 
 ---
+
+### Legacy: Whisper (устаревшее)
+
+> Whisper больше не используется в проде (перешли на transcribe + SpeechKit). Ошибки ниже оставлены для справки.
 
 ### E036: Тестовый WAV из случайного шума — Whisper возвращает пустой текст или музыку
 
@@ -1528,7 +1543,7 @@ print(stdout.read().decode())
 ```
 
 **Компоненты**:
-1. **transcribe_server.py** — HTTP сервер на порту 9001
+1. **transcribe service** (`services/transcribe/transcribe_server.py`) — HTTP сервер на порту 9001 внутри Docker
    - Принимает POST с `{filepath: "..."}`
    - Конвертирует путь `/recordings/` → `/mnt/recordings/`
    - Запускает транскрипцию в отдельном потоке
@@ -1557,6 +1572,8 @@ ASYNC ERR: could not translate host name "postgres" to address: No address assoc
 ```
 
 **Root Cause**: Сервер транскрипции работает на хосте, а `postgres` — это Docker hostname. С хоста нужно использовать `localhost`.
+
+> **Примечание**: Актуально только для legacy-режима (если transcribe запускается на хосте). В Docker используется hostname `postgres`.
 
 **НЕПРАВИЛЬНО** (для сервера на хосте):
 ```python
@@ -1687,7 +1704,7 @@ Mark as Transcribing → SpeechKit Transcribe (async, returns immediately)
 
 ---
 
-### E087: open-notebook API endpoints — /api/sources, не /notebooks
+### E087: open-notebook API endpoints — /api/notebooks для блокнотов
 
 **Symptom**:
 ```
@@ -1695,7 +1712,7 @@ Mark as Transcribing → SpeechKit Transcribe (async, returns immediately)
 GET /notebooks?archived=false → 404 Not Found
 ```
 
-**Root Cause**: open-notebook использует `/api/sources` для работы с notebooks, не `/notebooks`.
+**Root Cause**: Для блокнотов используется `/api/notebooks`. Для добавления транскриптов — `/api/sources/json`.
 
 **НЕПРАВИЛЬНО**:
 ```
@@ -1704,15 +1721,15 @@ GET http://open-notebook:5055/notebooks
 
 **ПРАВИЛЬНО**:
 ```
-GET http://open-notebook:5055/api/sources
-POST http://open-notebook:5055/api/sources (create)
-POST http://open-notebook:5055/api/sources/{id}/entries (add entry)
+GET http://open-notebook:5055/api/notebooks
+POST http://open-notebook:5055/api/notebooks (create)
+POST http://open-notebook:5055/api/sources/json (add entry)
 ```
 
 **Затронутые ноды**:
-- `Get Notebooks` → URL должен быть `/api/sources`
-- `Create Notebook` → URL должен быть `/api/sources`
-- `Save Transcript to Notebook` → URL должен быть `/api/sources/{sourceId}/entries`
+- `Get Notebooks` → URL должен быть `/api/notebooks`
+- `Create Notebook` → URL должен быть `/api/notebooks`
+- `Save Transcript to Notebook` → URL должен быть `/api/sources/json`
 
 ---
 
@@ -1800,19 +1817,17 @@ SpeechKit → Wait 3min → Check Transcript → Has Transcript?
 
 ### Быстрый старт (если всё сломалось)
 
-**1. Проверить сервер транскрипции**:
+> **Актуально для текущей версии:** transcribe работает внутри Docker (не через nohup).
+
+**1. Проверить transcribe сервис**:
 ```bash
-ssh root@84.252.100.93
-pgrep -a python3 | grep transcribe  # должен быть процесс
-tail /tmp/ts.log                     # логи
+docker compose ps transcribe
+docker compose logs transcribe --tail=50
 ```
 
-**2. Если сервер не работает**:
+**2. Если сервис не работает**:
 ```bash
-cd /root/mvp-auto-summary/scripts
-nohup python3 transcribe_server.py >> /tmp/ts.log 2>&1 &
-sleep 2
-pgrep -a python3 | grep transcribe
+docker compose up -d --build transcribe
 ```
 
 **3. Очистить processed_files для повторной обработки**:
@@ -1837,7 +1852,7 @@ docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "DELETE FROM proce
 │       ↓                                                             │
 │  Mark as Transcribing (INSERT status='transcribing')                │
 │       ↓                                                             │
-│  SpeechKit Transcribe (Code нода, POST to localhost:9001)           │
+│  SpeechKit Transcribe (Code нода, POST to transcribe:9001)          │
 │       ↓                                                             │
 │  Wait 3min → Check Transcript (Code нода, POST to /check)           │
 │       ↓                                                             │
@@ -1851,7 +1866,7 @@ docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "DELETE FROM proce
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    transcribe_server.py (host:9001)                 │
+│                    transcribe service (docker:9001)                 │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  POST /           → {"filepath": "/recordings/..."}                 │
@@ -1919,24 +1934,24 @@ docker compose up -d --force-recreate n8n
 | Endpoint | Method | Описание |
 |----------|--------|----------|
 | `/health` | GET | Health check |
-| `/api/sources` | GET | Список notebooks |
-| `/api/sources` | POST | Создать notebook: `{"name":"LEAD-123","description":"..."}` |
-| `/api/sources/{id}` | GET | Получить notebook |
-| `/api/sources/{id}/entries` | POST | Добавить запись: `{"content":"Текст...","title":"Транскрипция"}` |
+| `/api/notebooks` | GET | Список notebooks |
+| `/api/notebooks` | POST | Создать notebook: `{"title":"LEAD-123"}` |
+| `/api/notebooks/{id}` | GET | Получить notebook |
+| `/api/sources/json` | POST | Добавить запись: `{ "notebooks": ["notebook:..."], "type":"text", "content":"..." }` |
 
 **Примеры**:
 ```bash
 # Создать notebook
-curl -X POST http://localhost:5055/api/sources \
+curl -X POST http://localhost:5055/api/notebooks \
   -H "Authorization: Bearer password" \
   -H "Content-Type: application/json" \
-  -d '{"name":"LEAD-1000023","description":"Клиент 1000023"}'
+  -d '{"title":"LEAD-1000023"}'
 
 # Добавить транскрипцию
-curl -X POST http://localhost:5055/api/sources/{SOURCE_ID}/entries \
+curl -X POST http://localhost:5055/api/sources/json \
   -H "Authorization: Bearer password" \
   -H "Content-Type: application/json" \
-  -d '{"content":"Транскрибированный текст...","title":"Созвон 2026-02-20"}'
+  -d '{"notebooks":["notebook:xyz123"],"type":"text","content":"Транскрибированный текст...","title":"Созвон 2026-02-20","embed":true,"async_processing":false}'
 ```
 
 ---
@@ -1945,9 +1960,9 @@ curl -X POST http://localhost:5055/api/sources/{SOURCE_ID}/entries \
 
 **Где получить**: https://console.yandex.cloud → Сервисные аккаунты → API-ключ
 
-**Текущий рабочий ключ** (в transcribe_server.py):
+**Ключ хранится в `.env`**:
 ```
-AQVN_your_yandex_api_key_here
+YANDEX_API_KEY=YOUR_YANDEX_API_KEY
 ```
 
 **Квота**: ~10 000 запросов/месяц бесплатно
@@ -1970,7 +1985,7 @@ AQVN_your_yandex_api_key_here
 |----------|---------|
 | `_notReady: true` | Увеличить Wait (3 → 5 → 10 мин) |
 | `Task runner failed` | Убрать JavaScript loop, использовать Wait ноду |
-| `404 Not Found` | Проверить endpoint (`/api/sources` не `/notebooks`) |
+| `404 Not Found` | Проверить endpoint (`/api/notebooks` + `/api/sources/json`) |
 | `ECONNREFUSED :8888` | Порт 5055, не 8888. Проверить OPEN_NOTEBOOK_URL |
 | `connect ECONNREFUSED postgres` | Сервер на хосте, использовать `localhost:5432` |
 | `JSONDecodeError` | Использовать `JSON.stringify()` в body, не `json:` параметр |
@@ -1983,10 +1998,11 @@ AQVN_your_yandex_api_key_here
 /root/mvp-auto-summary/
 ├── docker-compose.yml
 ├── .env
-└── scripts/
-    └── transcribe_server.py   ← HTTP сервер транскрипции
+└── services/
+    └── transcribe/
+        └── transcribe_server.py   ← HTTP сервер транскрипции
 
-/tmp/ts.log                    ← Логи сервера
+Логи transcribe: `docker compose logs transcribe`
 
 /mnt/recordings/               ← Записи созвонов (NFS mount)
 ```
@@ -2007,12 +2023,12 @@ AQVN_your_yandex_api_key_here
 9.  Wait 3min (wait)
 10. Check Transcript (code: POST to localhost:9001/check)
 11. Has Transcript? (if)
-12. Get Notebooks (httpRequest: GET /api/sources)
+12. Get Notebooks (httpRequest: GET /api/notebooks)
 13. Find Client Notebook (code)
 14. Notebook Exists? (if)
-15. Create Notebook (httpRequest: POST /api/sources)
+15. Create Notebook (httpRequest: POST /api/notebooks)
 16. Get Notebook ID (code)
-17. Save Transcript to Notebook (httpRequest: POST /api/sources/{id}/entries)
+17. Save Transcript to Notebook (httpRequest: POST /api/sources/json)
 18. Save Success? (if)
 19. Mark Completed (postgres: UPDATE status='completed')
 20. Mark Notebook Error (postgres)
@@ -2022,3 +2038,217 @@ AQVN_your_yandex_api_key_here
 ---
 
 *Document created: 2026-02-18 | Updated: 2026-02-20 17:30 MSK — E090, полный quick start*
+
+---
+
+## Ошибки Dify + n8n интеграция (2026-02-26)
+
+### E091: Dify — порт 80, не 8080
+
+**Symptom**: `curl http://84.252.100.93:8080` → connection refused  
+**Root Cause**: Dify запущен с nginx-контейнером `docker-nginx-1`, который слушает порт 80, не 8080.  
+**Fix**: Использовать `http://84.252.100.93` (без порта) во всех URL.
+
+```bash
+# Проверить какой контейнер слушает порт:
+docker ps | grep nginx
+# Ответ: docker-nginx-1 → 0.0.0.0:80->80/tcp
+```
+
+**В .env**:
+```bash
+DIFY_BASE_URL=http://84.252.100.93       # НЕ :8080!
+DIFY_CHATBOT_URL=http://84.252.100.93    # НЕ :8080!
+```
+
+---
+
+### E092: Dify API — два разных типа ключей
+
+**Symptom**: `POST /v1/datasets` с `app-xxx` ключом → 401 Unauthorized  
+**Root Cause**: В Dify существуют два несовместимых типа API ключей:
+
+| Тип | Формат | Где получить | Для чего |
+|-----|--------|--------------|----------|
+| App API key | `app-xxx` | Studio → конкретное приложение → API Access | Чат с конкретным приложением |
+| Dataset API key | `dataset-xxx` | Знания (Knowledge) → Сервисный API | Управление базами знаний |
+
+**Fix**: Для создания/добавления документов в Knowledge Base — нужен `dataset-xxx` ключ.
+
+**Рабочий ключ**: `dataset-k7rrBrS6TsEixGGIyAvywfb0`
+
+---
+
+### E093: Dify — создание датасета с indexing_technique вызывает 400
+
+**Symptom**:
+```json
+{"code": "invalid_param", "message": "Embedding model not configured"}
+```
+
+**Root Cause**: На сервере не настроена embedding-модель (векторизация). `"indexing_technique": "high_quality"` требует embedding-модель.
+
+**НЕПРАВИЛЬНО**:
+```json
+{"name": "LEAD-4405", "indexing_technique": "high_quality"}
+```
+
+**ПРАВИЛЬНО** — создавать датасет без `indexing_technique`:
+```bash
+curl -X POST http://84.252.100.93/v1/datasets \
+  -H "Authorization: Bearer dataset-k7rrBrS6TsEixGGIyAvywfb0" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "LEAD-4405 ФФ-4405"}'
+```
+
+**Примечание**: Без embedding датасет работает на keyword-search. Для полноценного векторного RAG нужно добавить OpenAI или локальную модель в Dify Settings → Model Provider.
+
+---
+
+### E094: n8n 2.8.3 — `boolean:equal` оператор в IF не поддерживается
+
+**Symptom**: Workflow каждые 30 секунд падает с ошибкой:
+```
+Unknown filter parameter operator "boolean:equal"
+```
+
+**Root Cause**: n8n версии 2.8.3 не поддерживает `"type": "boolean", "operation": "equal"` в IF нодах.
+
+**НЕПРАВИЛЬНО**:
+```json
+"operator": { "type": "boolean", "operation": "equal" }
+"rightValue": true
+```
+
+**ПРАВИЛЬНО** — использовать строковое сравнение:
+```json
+"operator": { "type": "string", "operation": "equals" }
+"leftValue": "={{ String($json.hasCommand) }}"
+"rightValue": "true"
+```
+
+**Затронутые воркфлоу**: WF01 (`Is New File?`) и WF04 (`Has Command?`).
+
+---
+
+### E095: n8n API — PATCH /workflows не поддерживается
+
+**Symptom**: `curl -X PATCH /api/v1/workflows/ID` → `{"message":"PATCH method not allowed"}`  
+**Root Cause**: n8n Public API v1 не поддерживает PATCH для workflows.
+
+**Доступные методы для workflows**:
+- `GET /api/v1/workflows` — список
+- `GET /api/v1/workflows/{id}` — один workflow
+- `POST /api/v1/workflows` — создать
+- `DELETE /api/v1/workflows/{id}` — удалить
+- `POST /api/v1/workflows/{id}/activate` — активировать
+- `POST /api/v1/workflows/{id}/deactivate` — деактивировать
+
+**Fix для обновления workflow**: удалить старый + импортировать новый.
+
+---
+
+### E096: n8n — дублирующиеся воркфлоу с одним именем
+
+**Symptom**: После импорта в n8n появляются два активных воркфлоу с одинаковым именем — оба работают и конкурируют.
+
+**Root Cause**: n8n не заменяет существующий воркфлоу при импорте — создаёт новый с новым ID. Если старый не был удалён, оба активны.
+
+**Диагностика**:
+```bash
+curl -s "http://localhost:5678/api/v1/workflows?limit=20" \
+  -H "X-N8N-API-KEY: $N8N_API_KEY" | python3 -c "
+import sys,json
+for w in json.load(sys.stdin).get('data',[]):
+    print(f\"{w['id']}  [{w['active']}]  {w['name']}\")"
+```
+
+**Fix**: Перед импортом нового воркфлоу — удалить старый:
+```bash
+curl -X DELETE "http://localhost:5678/api/v1/workflows/СТАРЫЙ_ID" \
+  -H "X-N8N-API-KEY: $N8N_API_KEY"
+```
+
+---
+
+---
+
+### E097: n8n HTTP Request — `$getWorkflowStaticData` не работает в поле URL
+
+**Symptom**: `URL parameter must be a string, got undefined`
+
+**Root Cause**: `$getWorkflowStaticData('global').lastUpdateId` возвращает `undefined` в поле URL HTTP Request ноды — expression не вычисляется корректно в этом контексте.
+
+**НЕПРАВИЛЬНО**:
+```
+={{ 'https://api.telegram.org/bot.../getUpdates?offset=' + ($getWorkflowStaticData('global').lastUpdateId || 0) }}
+```
+
+**ПРАВИЛЬНО** — статичный URL без expression:
+```
+https://api.telegram.org/bot.../getUpdates?limit=20&timeout=0&allowed_updates=%5B%22message%22%5D&offset=0
+```
+
+**Примечание**: offset=0 означает что бот будет получать все необработанные обновления. Дедупликация происходит в Code ноде "Parse Command" через проверку `update_id <= staticData.lastUpdateId`.
+
+---
+
+### E098: n8n IF нода v2 — `Cannot read properties of undefined (reading 'caseSensitive')`
+
+**Symptom**:
+```
+Cannot read properties of undefined (reading 'caseSensitive')
+```
+
+**Root Cause**: IF нода версии 2 в n8n 2.8.3 требует обязательное поле `options` с `caseSensitive`. Без него падает.
+
+**НЕПРАВИЛЬНО**:
+```json
+"conditions": {
+  "conditions": [{ "leftValue": "...", "rightValue": "...", "operator": {...} }],
+  "combinator": "and"
+}
+```
+
+**ПРАВИЛЬНО**:
+```json
+"conditions": {
+  "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+  "conditions": [{ "id": "cond-id", "leftValue": "...", "rightValue": "...", "operator": { "type": "string", "operation": "equals", "rightType": "string" } }],
+  "combinator": "and"
+}
+```
+
+**Затронуто**: все IF ноды в WF04 (Has Command?, Is /report?, Is /status?, Is /rag?, Has Data?).
+
+---
+
+---
+
+### E099: n8n — параллельные Postgres ноды не дожидаются друг друга
+
+**Symptom**:
+```
+Node 'Load Clients' hasn't been executed
+```
+
+**Root Cause**: В connections были указаны две ноды параллельно из одного выхода IF:
+```json
+"Is /status?": { "main": [[
+  { "node": "Load System Status" },
+  { "node": "Load Clients" }
+]] }
+```
+n8n запускает их параллельно, но нода `Build Status` которая читает `$('Load Clients')` выполняется раньше чем `Load Clients` завершается.
+
+**Fix** — сделать цепочку:
+```json
+"Is /status?":      { "main": [[{ "node": "Load System Status" }], [...]] },
+"Load System Status": { "main": [[{ "node": "Load Clients" }]] },
+"Load Clients":       { "main": [[{ "node": "Build Status" }]] }
+```
+И в `Build Status` читать клиентов из `$input.all()` вместо `$('Load Clients').all()`.
+
+---
+
+*Обновлено: 2026-02-26 — E091-E099: все баги Telegram бота задокументированы. Бот полностью работает.*

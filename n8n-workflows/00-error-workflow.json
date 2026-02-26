@@ -1,0 +1,79 @@
+{
+  "name": "00 — Error Workflow (Alerts)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const err = $json.execution?.error || {};\nconst workflow = $json.workflow || {};\nconst nodeName = err.node?.name || err.node || 'unknown';\nconst msg = err.message || 'Unknown error';\nconst execId = $json.execution?.id || 'unknown';\nconst when = new Date().toISOString();\nconst url = `http://84.252.100.93:5678/executions/${execId}`;\nconst text = `⚠️ ОШИБКА в системе отчётов\\n\\nWorkflow: ${workflow.name || workflow.id || 'unknown'}\\nNode: ${nodeName}\\nError: ${msg}\\nTime: ${when}\\n\\n${url}`;\nreturn [{ json: { text } }];"
+      },
+      "id": "format-error",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: $json.text }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "send-telegram",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0
+}

@@ -1,89 +1,50 @@
 {
-  "name": "04 — Telegram Bot Commands (/report)",
+  "name": "04 — Telegram Bot Commands (/report /status /rag)",
   "nodes": [
     {
       "parameters": {
         "rule": {
-          "interval": [
-            {
-              "field": "seconds",
-              "secondsInterval": 30
-            }
-          ]
+          "interval": [{ "field": "seconds", "secondsInterval": 30 }]
         }
       },
-      "id": "poll-trigger",
+      "id": "schedule-poll",
       "name": "Poll Every 30s",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [
-        0,
-        0
-      ]
+      "position": [-440, 0]
     },
+
     {
       "parameters": {
-        "method": "GET",
-        "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/getUpdates",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "timeout",
-              "value": "5"
-            },
-            {
-              "name": "allowed_updates",
-              "value": "[\"message\"]"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 10000
-        }
-      },
-      "id": "get-updates",
-      "name": "Get Updates",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        220,
-        0
-      ],
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "jsCode": "const updates = $input.first().json.result || [];\nif (updates.length === 0) { return [{ json: { hasCommand: false, chatId: -1003872092456 } }]; }\nconst r = updates.find(u => {\n  const t = (u.message && u.message.text) ? u.message.text.trim() : '';\n  return t === '/report' || t.startsWith('/report@');\n});\nreturn [{ json: { hasCommand: !!r, chatId: r ? r.message.chat.id : -1003872092456 } }];"
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst offset = (staticData.lastUpdateId || 0) + 1;\n\n// Получаем updates с правильным offset\nconst resp = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/getUpdates?limit=20&timeout=0&offset=${offset}`,\n  timeout: 15000\n});\n\nconst updates = (resp.result || []);\n\nif (updates.length === 0) {\n  return [{ json: { hasCommand: false } }];\n}\n\nconst maxId = Math.max(...updates.map(u => u.update_id));\n\n// Собираем команды\nconst commands = [];\nfor (const u of updates) {\n  const msg = u.message;\n  if (!msg || !msg.text) continue;\n  const text = msg.text.trim();\n  let cmd = null;\n  if (text.startsWith('/report')) cmd = 'report';\n  else if (text.startsWith('/status')) cmd = 'status';\n  else if (text.startsWith('/rag')) cmd = 'rag';\n  else if (text.startsWith('/help')) cmd = 'help';\n  if (cmd) {\n    commands.push({ cmd, chatId: msg.chat.id, text, update_id: u.update_id });\n  }\n}\n\n// Сохраняем offset\nstaticData.lastUpdateId = maxId;\n\nif (commands.length === 0) {\n  return [{ json: { hasCommand: false } }];\n}\n\nconst latest = commands[commands.length - 1];\nreturn [{ json: { hasCommand: true, ...latest } }];"
       },
       "id": "parse-command",
       "name": "Parse Command",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        440,
-        0
-      ]
+      "position": [-220, 0]
     },
+
     {
       "parameters": {
         "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "loose"
-          },
-          "conditions": [
-            {
-              "id": "cond",
-              "leftValue": "={{ String($json.hasCommand) }}",
-              "rightValue": "true",
-              "operator": {
-                "type": "string",
-                "operation": "equals"
-              }
-            }
-          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "cond-has-command", "leftValue": "={{ String($json.hasCommand) }}", "rightValue": "true", "operator": { "type": "string", "operation": "equals", "rightType": "string" } }],
+          "combinator": "and"
+        }
+      },
+      "id": "if-command",
+      "name": "Has Command?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "cond-is-report", "leftValue": "={{ $json.cmd }}", "rightValue": "report", "operator": { "type": "string", "operation": "equals", "rightType": "string" } }],
           "combinator": "and"
         }
       },
@@ -91,87 +52,70 @@
       "name": "Is /report?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [
-        660,
-        0
-      ]
+      "position": [440, -200]
     },
+
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS bot_chats (  chat_id BIGINT PRIMARY KEY,  added_at TIMESTAMP DEFAULT NOW());INSERT INTO bot_chats (chat_id) VALUES ($1) ON CONFLICT DO NOTHING;",
-        "options": {
-          "queryReplacement": "={{ $json.chatId }}"
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "cond-is-status", "leftValue": "={{ $json.cmd }}", "rightValue": "status", "operator": { "type": "string", "operation": "equals", "rightType": "string" } }],
+          "combinator": "and"
         }
       },
-      "id": "save-chat-id",
-      "name": "Save Chat ID",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [
-        880,
-        -200
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      }
+      "id": "is-status",
+      "name": "Is /status?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
     },
+
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "cond-is-rag", "leftValue": "={{ $json.cmd }}", "rightValue": "rag", "operator": { "type": "string", "operation": "equals", "rightType": "string" } }],
+          "combinator": "and"
+        }
+      },
+      "id": "is-rag",
+      "name": "Is /rag?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 200]
+    },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT id, filename, lead_id, transcript_text, created_at FROM processed_files WHERE status = 'completed' AND DATE(created_at) = CURRENT_DATE AND transcript_text IS NOT NULL ORDER BY created_at ASC",
+        "query": "SELECT pf.id, pf.lead_id, pf.transcript_text, pf.filename, lcm.lead_name, lcm.curators FROM processed_files pf LEFT JOIN lead_chat_mapping lcm ON lcm.lead_id = pf.lead_id WHERE pf.status = 'completed' AND COALESCE(pf.summary_sent, false) = false AND pf.transcript_text IS NOT NULL ORDER BY pf.created_at DESC LIMIT 20",
         "options": {}
       },
       "id": "load-transcripts",
-      "name": "Load Today Transcripts",
+      "name": "Load Unsent Transcripts",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [
-        1100,
-        -200
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      }
+      "position": [660, -300],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
+
     {
       "parameters": {
-        "jsCode": "const items = $input.all();\nconst chatId = $('Parse Command').first().json.chatId;\nif (items.length === 0 || (items.length === 1 && !items[0].json.id)) {\n  return [{ json: { hasData: false, combined: '', rowIds: [], count: 0, chatId: chatId } }];\n}\nconst MAX = 50000;\nlet combined = '';\nconst rowIds = [];\nconst leadIds = new Set();\nfor (const item of items) {\n  const row = item.json;\n  if (!row.id) continue;\n  rowIds.push(row.id);\n  leadIds.add(row.lead_id || 'UNKNOWN');\n  const chunk = '[LEAD-' + row.lead_id + ' | ' + row.filename + ']\\n' + row.transcript_text + '\\n\\n';\n  if (combined.length + chunk.length < MAX) combined += chunk;\n}\nreturn [{ json: { hasData: rowIds.length > 0, combined: combined.trim(), rowIds: rowIds, leadIds: Array.from(leadIds), count: rowIds.length, chatId: chatId } }];"
+        "mode": "runOnceForAllItems",
+        "jsCode": "const items = $input.all();\nconst chatId = $('Parse Command').first().json.chatId;\n\nif (items.length === 0 || !items[0].json.id) {\n  return [{ json: { hasData: false, combined: '', rowIds: [], leadIds: [], count: 0, chatId } }];\n}\n\nconst dateLabel = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' (по запросу)';\nconst MAX_CHARS = 50000;\nconst sections = [];\nlet totalLen = 0;\n\nconst byLead = {};\nfor (const item of items) {\n  const { lead_id, lead_name, curators, transcript_text, id } = item.json;\n  if (!lead_id) continue;\n  const lid = String(lead_id);\n  if (!byLead[lid]) byLead[lid] = { lead_id: lid, lead_name: lead_name || `ФФ-${lid}`, curators: curators || '', calls: [], ids: [] };\n  byLead[lid].calls.push(transcript_text || '');\n  byLead[lid].ids.push(id);\n}\n\nfor (const lid of Object.keys(byLead)) {\n  const g = byLead[lid];\n  const section = `=== LEAD-${lid} (${g.lead_name}) ===\\n${g.calls.join('\\n---\\n')}`;\n  if (totalLen + section.length > MAX_CHARS) break;\n  sections.push(section);\n  totalLen += section.length;\n}\n\nconst combined = sections.join('\\n\\n');\nconst rowIds = Object.values(byLead).flatMap(g => g.ids).slice(0, sections.length * 5);\nconst leadIds = Object.keys(byLead);\n\nreturn [{ json: { hasData: true, dateLabel, combined, rowIds, leadIds, count: sections.length, chatId } }];"
       },
       "id": "aggregate",
       "name": "Aggregate Transcripts",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        1320,
-        -200
-      ]
+      "position": [880, -300]
     },
+
     {
       "parameters": {
         "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "loose"
-          },
-          "conditions": [
-            {
-              "id": "cond",
-              "leftValue": "={{ String($json.hasData) }}",
-              "rightValue": "true",
-              "operator": {
-                "type": "string",
-                "operation": "equals"
-              }
-            }
-          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [{ "id": "cond-has-data", "leftValue": "={{ $json.combined }}", "rightValue": "", "operator": { "type": "string", "operation": "notEmpty", "rightType": "string" } }],
           "combinator": "and"
         }
       },
@@ -179,301 +123,270 @@
       "name": "Has Data?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [
-        1540,
-        -200
-      ]
+      "position": [1100, -300]
     },
+
     {
       "parameters": {
         "method": "POST",
         "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: $('Parse Command').first().json.chatId, text: 'Сегодня созвонов ещё не было.' }) }}",
-        "options": {}
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $json.chatId, text: '📊 Нет новых созвонов для отчёта. Все уже были отправлены или ещё не обработаны.' }) }}",
+        "options": { "timeout": 30000 }
       },
       "id": "send-no-data",
       "name": "Send No Data",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        1760,
-        0
-      ]
+      "position": [1100, -160]
     },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS prompts (  name VARCHAR(100) PRIMARY KEY,  prompt_text TEXT NOT NULL,  last_result TEXT,  updated_at TIMESTAMP DEFAULT NOW());SELECT prompt_text FROM prompts WHERE name = 'report_prompt' LIMIT 1;",
+        "query": "WITH prompt AS (SELECT prompt_text FROM prompts WHERE name = 'report_prompt' AND is_active = true ORDER BY version DESC LIMIT 1) SELECT COALESCE((SELECT prompt_text FROM prompt), '') AS prompt_text",
         "options": {}
       },
-      "id": "load-prompt",
+      "id": "load-report-prompt",
       "name": "Load Report Prompt",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [
-        1760,
-        -300
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      },
-      "continueOnFail": true
+      "position": [1100, -480],
+      "continueOnFail": true,
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
+
     {
       "parameters": {
-        "jsCode": "const rows = $input.all();\nconst defaultPrompt = \"\\u0422\\u044b \\u0430\\u043d\\u0430\\u043b\\u0438\\u0442\\u0438\\u043a \\u043e\\u0442\\u0434\\u0435\\u043b\\u0430 \\u043a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440\\u043e\\u0432 \\u0444\\u0443\\u043b\\u0444\\u0438\\u043b\\u043c\\u0435\\u043d\\u0442-\\u043a\\u043e\\u043c\\u043f\\u0430\\u043d\\u0438\\u0438. \\u0422\\u0435\\u0431\\u0435 \\u0434\\u0430\\u044e\\u0442 \\u0442\\u0440\\u0430\\u043d\\u0441\\u043a\\u0440\\u0438\\u043f\\u0442\\u044b \\u0441\\u043e\\u0437\\u0432\\u043e\\u043d\\u043e\\u0432 \\u043a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440\\u043e\\u0432 \\u0441 \\u043a\\u043b\\u0438\\u0435\\u043d\\u0442\\u0430\\u043c\\u0438 \\u0437\\u0430 \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f\\u0448\\u043d\\u0438\\u0439 \\u0434\\u0435\\u043d\\u044c.\\n\\n\\u0421\\u043e\\u0441\\u0442\\u0430\\u0432\\u044c \\u0441\\u0442\\u0440\\u0443\\u043a\\u0442\\u0443\\u0440\\u0438\\u0440\\u043e\\u0432\\u0430\\u043d\\u043d\\u044b\\u0439 \\u041e\\u0422\\u0427\\u0401\\u0422 \\u041f\\u041e \\u041a\\u0423\\u0420\\u0410\\u0422\\u041e\\u0420\\u0410\\u041c:\\n\\n\\u0414\\u043b\\u044f \\u043a\\u0430\\u0436\\u0434\\u043e\\u0433\\u043e \\u043a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440\\u0430 (\\u0415\\u0432\\u0433\\u0435\\u043d\\u0438\\u0439, \\u041a\\u0440\\u0438\\u0441\\u0442\\u0438\\u043d\\u0430, \\u0410\\u043d\\u043d\\u0430, \\u0413\\u0430\\u043b\\u0438\\u043d\\u0430, \\u0414\\u0430\\u0440\\u044c\\u044f, \\u0421\\u0442\\u0430\\u043d\\u0438\\u0441\\u043b\\u0430\\u0432, \\u0410\\u043d\\u0434\\u0440\\u0435\\u0439), \\u043a\\u0442\\u043e \\u0443\\u043f\\u043e\\u043c\\u0438\\u043d\\u0430\\u0435\\u0442\\u0441\\u044f \\u0432 \\u0441\\u043e\\u0437\\u0432\\u043e\\u043d\\u0430\\u0445:\\n\\n\\ud83d\\udc64 [\\u0418\\u043c\\u044f \\u043a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440\\u0430]\\n\\u2022 \\u0421\\u043e\\u0437\\u0432\\u043e\\u043d\\u043e\\u0432 \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f: N\\n\\u2022 \\u041a\\u043b\\u0438\\u0435\\u043d\\u0442\\u044b: LEAD-XXXX, LEAD-YYYY\\n\\u2022 \\u0420\\u0435\\u0448\\u0451\\u043d\\u043d\\u044b\\u0435 \\u0432\\u043e\\u043f\\u0440\\u043e\\u0441\\u044b: ...\\n\\u2022 \\u041d\\u0435\\u0440\\u0435\\u0448\\u0451\\u043d\\u043d\\u044b\\u0435 \\u0432\\u043e\\u043f\\u0440\\u043e\\u0441\\u044b / \\u0437\\u0430\\u0434\\u0430\\u0447\\u0438: ...\\n\\u2022 \\u0414\\u043e\\u0433\\u043e\\u0432\\u043e\\u0440\\u0451\\u043d\\u043d\\u043e\\u0441\\u0442\\u0438: ...\\n\\n\\u041f\\u0440\\u0430\\u0432\\u0438\\u043b\\u0430:\\n- \\u0412\\u043a\\u043b\\u044e\\u0447\\u0430\\u0439 \\u0442\\u043e\\u043b\\u044c\\u043a\\u043e \\u043a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440\\u043e\\u0432, \\u043a\\u0442\\u043e \\u0440\\u0435\\u0430\\u043b\\u044c\\u043d\\u043e \\u0443\\u043f\\u043e\\u043c\\u0438\\u043d\\u0430\\u0435\\u0442\\u0441\\u044f \\u0432 \\u0442\\u0440\\u0430\\u043d\\u0441\\u043a\\u0440\\u0438\\u043f\\u0442\\u0430\\u0445\\n- \\u041f\\u0438\\u0448\\u0438 \\u0442\\u043e\\u043b\\u044c\\u043a\\u043e \\u043a\\u043e\\u043d\\u043a\\u0440\\u0435\\u0442\\u043d\\u044b\\u0435 \\u0444\\u0430\\u043a\\u0442\\u044b \\u0438\\u0437 \\u0442\\u0435\\u043a\\u0441\\u0442\\u0430, \\u043d\\u0435 \\u043f\\u0440\\u0438\\u0434\\u0443\\u043c\\u044b\\u0432\\u0430\\u0439\\n- \\u0424\\u043e\\u0440\\u043c\\u0430\\u0442: Markdown\\n- \\u0415\\u0441\\u043b\\u0438 \\u043a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440\\u0430 \\u043e\\u043f\\u0440\\u0435\\u0434\\u0435\\u043b\\u0438\\u0442\\u044c \\u043d\\u0435\\u0432\\u043e\\u0437\\u043c\\u043e\\u0436\\u043d\\u043e \\u2014 \\u0443\\u043a\\u0430\\u0436\\u0438 '\\u041a\\u0443\\u0440\\u0430\\u0442\\u043e\\u0440 \\u043d\\u0435 \\u043e\\u043f\\u0440\\u0435\\u0434\\u0435\\u043b\\u0451\\u043d' \\u0438 \\u043e\\u043f\\u0438\\u0448\\u0438 \\u0441\\u043e\\u0437\\u0432\\u043e\\u043d \\u043f\\u043e \\u043a\\u043b\\u0438\\u0435\\u043d\\u0442\\u0443\";\nconst meta = $('Aggregate Transcripts').first().json;\nconst promptRow = rows.find(r => r.json && r.json.prompt_text);\nconst systemPrompt = promptRow ? promptRow.json.prompt_text : defaultPrompt;\nreturn [{ json: { ...meta, systemPrompt } }];"
+        "jsCode": "const rows = $input.all();\nconst defaultPrompt = 'Ты аналитик отдела кураторов фулфилмент-компании. Тебе дают транскрипты созвонов.\\n\\nКУРАТОРЫ: Евгений, Кристина, Анна (основные), Галина, Дарья (консультанты), Станислав, Андрей (руководители).\\n\\nФОРМАТ ОТЧЁТА (HTML):\\n\\n<b>📊 Промежуточный отчёт за [ДАТА]</b>\\n\\n<b>👤 [КУРАТОР]:</b>\\n  • Созвонов: N (LEAD-XXXX)\\n  • Решённых вопросов: N — кратко\\n  • Открытых вопросов: N — кратко\\n\\nМаксимум 3500 символов.';\nconst prompt = rows.length > 0 && rows[0].json.prompt_text ? rows[0].json.prompt_text : defaultPrompt;\nconst meta = $('Aggregate Transcripts').first().json;\nreturn [{ json: { ...meta, systemPrompt: prompt } }];"
       },
-      "id": "prepare-glm",
-      "name": "Prepare GLM Request",
+      "id": "prep-report-prompt",
+      "name": "Prepare Report Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        1980,
-        -300
-      ]
+      "position": [1320, -480]
     },
+
     {
       "parameters": {
         "method": "POST",
         "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.combined }], temperature: 0.2, max_tokens: 2000, stream: false, thinking: { type: 'disabled' } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.combined }], temperature: 0.2, max_tokens: 1500, stream: false, thinking: { type: 'disabled' } }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6"
-            }
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
-        "options": {
-          "timeout": 60000
-        }
+        "options": { "timeout": 120000, "retry": { "enabled": true, "maxRetries": 2, "waitBetweenRetries": 5000 } }
       },
-      "id": "glm-summarize",
-      "name": "GLM-4 Build Report",
+      "id": "glm-report",
+      "name": "GLM-4 Report",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        2200,
-        -300
-      ],
-      "continueOnFail": true
+      "position": [1320, -300]
     },
+
     {
       "parameters": {
-        "jsCode": "const meta = $('Load Report Prompt').first().json;\nconst g = $json;\nconst msg = g.choices && g.choices[0] ? g.choices[0].message : {};\nconst content = (msg.content || msg.reasoning_content || '').trim() || 'Отчёт не получен.';\nconst now = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric' });\nconst header = '📊 *Отчёт по кураторам* (' + now + ')\\n' + 'Созвонов: ' + meta.count + ' | Клиенты: ' + meta.leadIds.map(id => 'LEAD-' + id).join(', ') + '\\n\\n';\nreturn [{ json: { digest: header + content, rowIds: meta.rowIds, chatId: meta.chatId } }];"
+        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst glmResp = $json;\nconst msg = glmResp.choices?.[0]?.message || {};\nconst content = (msg.content || msg.reasoning_content || 'Сводка не получена.').trim();\nconst leadList = (meta.leadIds || []).map(id => `LEAD-${id}`).join(', ') || '—';\nconst DIFY_URL = $env.DIFY_CHATBOT_URL || 'http://84.252.100.93:8080';\nconst header = `<b>📊 Промежуточный отчёт за ${meta.dateLabel}</b>\\nСозвонов: ${meta.count} | Клиентов: ${(meta.leadIds||[]).length}\\n<a href=\"${DIFY_URL}\">Открыть RAG Ассистент ↗</a>`;\nconst digest = (header + '\\n\\n' + content).trim();\nreturn [{ json: { digest, summaryText: content, rowIds: meta.rowIds, chatId: meta.chatId } }];"
       },
-      "id": "build-digest",
-      "name": "Build Digest",
+      "id": "build-report",
+      "name": "Build Report",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        2420,
-        -300
-      ]
+      "position": [1540, -300]
     },
+
     {
       "parameters": {
-        "jsCode": "const text = $json.digest || '';\nconst chatId = $json.chatId;\nconst rowIds = $json.rowIds;\nconst max = 3500;\nconst chunks = [];\nfor (let i = 0; i < text.length; i += max) chunks.push(text.slice(i, i + max));\nreturn chunks.map((c, i) => ({ json: { text: c, chatId: chatId, rowIds: rowIds, isLast: i === chunks.length - 1 } }));"
+        "jsCode": "const text = $json.digest || '';\nconst max = 4000;\nconst chunks = [];\nfor (let i = 0; i < text.length; i += max) chunks.push(text.slice(i, i + max));\nconst chatId = $json.chatId;\nreturn chunks.map((chunk, idx) => ({ json: { chatId, text: chunks.length > 1 ? chunk + `\\n\\n(${idx+1}/${chunks.length})` : chunk, rowIds: $json.rowIds } }));"
       },
-      "id": "chunk-telegram",
-      "name": "Chunk for Telegram",
+      "id": "chunk-report",
+      "name": "Chunk Report",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        2640,
-        -300
-      ]
+      "position": [1760, -300]
     },
+
     {
       "parameters": {
         "method": "POST",
         "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chatId, text: $json.text, parse_mode: 'Markdown' }) }}",
-        "options": {}
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $json.chatId, text: $json.text, disable_web_page_preview: false }) }}",
+        "options": { "timeout": 60000 }
       },
-      "id": "send-telegram",
-      "name": "Send to Telegram",
+      "id": "send-report",
+      "name": "Send Report",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        2860,
-        -300
-      ],
-      "continueOnFail": true
+      "position": [1980, -300]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total, COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed, COUNT(CASE WHEN status = 'error' THEN 1 END) as errors, COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE THEN 1 END) as today FROM processed_files",
+        "options": {}
+      },
+      "id": "load-status",
+      "name": "Load System Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [660, 0],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT lead_id, lead_name, curators, active FROM lead_chat_mapping ORDER BY lead_id",
+        "options": {}
+      },
+      "id": "load-clients-status",
+      "name": "Load Clients",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [660, 160],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Получаем статистику из предыдущей ноды (Load Clients)\nconst clientRows = $input.all();\nconst statsRows = $('Load System Status').all();\nconst chatId = $('Parse Command').first().json.chatId;\n\nconst stats = statsRows[0]?.json || {};\nconst clients = clientRows.map(r => r.json);\n\nconst now = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });\nconst DIFY_URL = 'http://84.252.100.93';\n\nconst clientList = clients.map(c => {\n  const curator = c.curators ? ` (${c.curators})` : '';\n  const status = c.active ? '✅' : '❌';\n  return `  ${status} LEAD-${c.lead_id} ${c.lead_name || ''}${curator}`;\n}).join('\\n');\n\nconst text = [\n  `<b>⚙️ Статус системы</b> (${now})`,\n  '',\n  `<b>Записи:</b>`,\n  `  Всего: ${stats.total || 0}`,\n  `  Готово: ${stats.completed || 0}`,\n  `  Ошибок: ${stats.errors || 0}`,\n  `  Сегодня: ${stats.today || 0}`,\n  '',\n  `<b>Клиенты (${clients.length}):</b>`,\n  clientList,\n  '',\n  `<b>Ссылки:</b>`,\n  `  <a href=\"http://84.252.100.93:5678\">n8n UI ↗</a>`,\n  `  <a href=\"${DIFY_URL}\">Dify RAG ↗</a>`,\n  `  <a href=\"http://84.252.100.93:8181/summaries/\">Саммари ↗</a>`,\n].join('\\n');\n\nreturn [{ json: { text, chatId } }];"
+      },
+      "id": "build-status",
+      "name": "Build Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 80]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $json.chatId, text: $json.text, disable_web_page_preview: true }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-status",
+      "name": "Send Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 80]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const chatId = $('Parse Command').first().json.chatId;\nconst DIFY_URL = 'http://84.252.100.93';\nconst SUMMARIES_URL = 'http://84.252.100.93:8181';\n\nconst text = [\n  '<b>🤖 ФФ Ассистент Куратора (RAG)</b>',\n  '',\n  'Задавай вопросы по клиентам в Dify:',\n  `<a href=\"${DIFY_URL}\">${DIFY_URL}</a>`,\n  '',\n  '<b>Примеры вопросов:</b>',\n  '• «ФФ-4405 — о чём договорились на прошлой неделе?»',\n  '• «ФФ-987 — какие нерешённые вопросы?»',\n  '• «Что говорит оферта про возврат товара?»',\n  '',\n  '<b>Саммари (текстовые файлы):</b>',\n  `<a href=\"${SUMMARIES_URL}/summaries/\">${SUMMARIES_URL}/summaries/</a>`,\n].join('\\n');\n\nreturn [{ json: { text, chatId } }];"
+      },
+      "id": "build-rag-link",
+      "name": "Build RAG Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $json.chatId, text: $json.text, disable_web_page_preview: false }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-rag-link",
+      "name": "Send RAG Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 300]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const chatId = $('Parse Command').first().json.chatId;\nconst text = [\n  '<b>📋 Команды бота:</b>',\n  '',\n  '/report — Промежуточный отчёт по всем созвонам',\n  '/status — Статус системы и список клиентов',\n  '/rag — Ссылка на RAG-ассистент в Dify',\n  '/help — Эта справка',\n].join('\\n');\nreturn [{ json: { text, chatId } }];"
+      },
+      "id": "build-help",
+      "name": "Build Help",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -120]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $json.chatId, text: $json.text }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-help",
+      "name": "Send Help",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -120]
     }
   ],
   "connections": {
-    "Poll Every 30s": {
+    "Poll Every 30s":   { "main": [[{ "node": "Parse Command",  "type": "main", "index": 0 }]] },
+    "Parse Command":    { "main": [[{ "node": "Has Command?",   "type": "main", "index": 0 }]] },
+    "Has Command?": {
       "main": [
-        [
-          {
-            "node": "Get Updates",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get Updates": {
-      "main": [
-        [
-          {
-            "node": "Parse Command",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Parse Command": {
-      "main": [
-        [
-          {
-            "node": "Is /report?",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Is /report?", "type": "main", "index": 0 }],
+        []
       ]
     },
     "Is /report?": {
       "main": [
-        [
-          {
-            "node": "Save Chat ID",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        []
+        [{ "node": "Load Unsent Transcripts", "type": "main", "index": 0 }],
+        [{ "node": "Is /status?",             "type": "main", "index": 0 }]
       ]
     },
-    "Save Chat ID": {
+    "Is /status?": {
       "main": [
-        [
-          {
-            "node": "Load Today Transcripts",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Load System Status", "type": "main", "index": 0 }],
+        [{ "node": "Is /rag?", "type": "main", "index": 0 }]
       ]
     },
-    "Load Today Transcripts": {
+    "Is /rag?": {
       "main": [
-        [
-          {
-            "node": "Aggregate Transcripts",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Build RAG Link", "type": "main", "index": 0 }],
+        [{ "node": "Build Help",     "type": "main", "index": 0 }]
       ]
     },
-    "Aggregate Transcripts": {
-      "main": [
-        [
-          {
-            "node": "Has Data?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
+    "Load Unsent Transcripts": { "main": [[{ "node": "Aggregate Transcripts", "type": "main", "index": 0 }]] },
+    "Aggregate Transcripts":   { "main": [[{ "node": "Has Data?",              "type": "main", "index": 0 }]] },
     "Has Data?": {
       "main": [
-        [
-          {
-            "node": "Load Report Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Send No Data",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Load Report Prompt", "type": "main", "index": 0 }],
+        [{ "node": "Send No Data",       "type": "main", "index": 0 }]
       ]
     },
-    "Load Report Prompt": {
-      "main": [
-        [
-          {
-            "node": "Prepare GLM Request",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare GLM Request": {
-      "main": [
-        [
-          {
-            "node": "GLM-4 Build Report",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "GLM-4 Build Report": {
-      "main": [
-        [
-          {
-            "node": "Build Digest",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Digest": {
-      "main": [
-        [
-          {
-            "node": "Chunk for Telegram",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Chunk for Telegram": {
-      "main": [
-        [
-          {
-            "node": "Send to Telegram",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    }
+    "Load Report Prompt":   { "main": [[{ "node": "Prepare Report Prompt", "type": "main", "index": 0 }]] },
+    "Prepare Report Prompt": { "main": [[{ "node": "GLM-4 Report",         "type": "main", "index": 0 }]] },
+    "GLM-4 Report":         { "main": [[{ "node": "Build Report",           "type": "main", "index": 0 }]] },
+    "Build Report":         { "main": [[{ "node": "Chunk Report",           "type": "main", "index": 0 }]] },
+    "Chunk Report":         { "main": [[{ "node": "Send Report",            "type": "main", "index": 0 }]] },
+    "Load System Status":   { "main": [[{ "node": "Load Clients",           "type": "main", "index": 0 }]] },
+    "Load Clients":         { "main": [[{ "node": "Build Status",           "type": "main", "index": 0 }]] },
+    "Build Status":         { "main": [[{ "node": "Send Status",            "type": "main", "index": 0 }]] },
+    "Build RAG Link":       { "main": [[{ "node": "Send RAG Link",          "type": "main", "index": 0 }]] },
+    "Build Help":           { "main": [[{ "node": "Send Help",              "type": "main", "index": 0 }]] }
   },
-  "settings": {
-    "executionOrder": "v1",
-    "timezone": "Europe/Moscow"
-  },
+  "settings": { "executionOrder": "v1", "timezone": "Europe/Moscow" },
   "staticData": null,
-  "tags": [
-    {
-      "name": "MVP Auto-Summary"
-    }
-  ]
+  "tags": [{ "name": "MVP Auto-Summary" }],
+  "triggerCount": 1
 }

@@ -1,232 +1,139 @@
 {
-  "name": "03 — Individual Summaries (Calls + Chats)",
+  "name": "03 — Individual Summaries → GLM-4 → Dify (per client)",
   "nodes": [
     {
       "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "cronExpression",
-              "expression": "0 22 * * *"
-            }
-          ]
-        }
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 22 * * *" }] }
       },
-      "id": "daily-trigger",
+      "id": "trigger",
       "name": "Daily 22:00",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [
-        -880,
-        208
-      ]
+      "position": [0, 300]
     },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT id, filename, lead_id, transcript_text, created_at::date as call_date FROM processed_files WHERE status = 'completed' AND DATE(created_at) = CURRENT_DATE AND transcript_text IS NOT NULL ORDER BY lead_id, created_at",
-        "options": {}
+        "query": "SELECT lead_id, dify_dataset_id FROM lead_chat_mapping WHERE active = true ORDER BY lead_id"
+      },
+      "id": "load-clients",
+      "name": "Load Client Dataset Map",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 300],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Build lead_id → dify_dataset_id lookup\nconst items = $input.all();\nconst map = {};\nfor (const item of items) {\n  const { lead_id, dify_dataset_id } = item.json;\n  if (lead_id && dify_dataset_id) {\n    map[String(lead_id)] = dify_dataset_id;\n  }\n}\n// Store in static data for later nodes\nconst staticData = $getWorkflowStaticData('global');\nstaticData.datasetMap = map;\nreturn [{ json: { datasetMap: map, clientCount: Object.keys(map).length } }];"
+      },
+      "id": "build-map",
+      "name": "Build Dataset Map",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pf.id, pf.filename, pf.lead_id, pf.transcript_text FROM processed_files pf WHERE pf.status = 'completed' AND DATE(COALESCE(pf.file_date, pf.completed_at::date, pf.created_at::date)) = CURRENT_DATE AND pf.transcript_text IS NOT NULL AND (pf.dify_doc_id IS NULL OR pf.dify_doc_id = '') ORDER BY pf.lead_id, pf.id LIMIT 20"
       },
       "id": "load-calls",
       "name": "Load Today's Calls",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [
-        -656,
-        112
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      }
+      "position": [660, 100],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT lead_id, chat_title, STRING_AGG('[' || TO_CHAR(message_date, 'HH24:MI') || '] ' || sender || ': ' || message_text, E'\\n' ORDER BY message_date) as chat_text, COUNT(*) as msg_count, MIN(message_date) as first_msg, MAX(message_date) as last_msg FROM chat_messages WHERE DATE(message_date) = CURRENT_DATE GROUP BY lead_id, chat_title ORDER BY lead_id",
-        "options": {}
+        "query": "SELECT lead_id, chat_title, sender, message_text, message_date FROM chat_messages WHERE DATE(message_date) = CURRENT_DATE AND summary_sent = false ORDER BY lead_id, message_date LIMIT 500"
       },
       "id": "load-chats",
       "name": "Load Today's Chats",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [
-        -656,
-        304
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      }
+      "position": [660, 500],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
+
     {
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const calls = $input.all();\nconst results = [];\nfor (const call of calls) {\n  const { id, filename, lead_id, transcript_text, call_date } = call.json;\n  const timeParts = filename.match(/_(\\d{2}-\\d{2})\\./)?.[1] || '00-00';\n  const truncated = transcript_text.length > 80000 ? transcript_text.slice(0, 80000) + '\\n...[обрезано]' : transcript_text;\n  results.push({ json: { type: 'call', lead_id: String(lead_id), source_id: id, filename, time_str: timeParts, content: truncated, call_date } });\n}\nreturn results.length > 0 ? results : [{ json: { type: 'call', lead_id: null, empty: true } }];"
+        "jsCode": "// Group calls by lead_id, attach dataset_id\nconst items = $input.all();\nconst datasetMap = $('Build Dataset Map').first().json.datasetMap || {};\n\nif (items.length === 0 || !items[0].json.id) {\n  return [{ json: { _skip: true, type: 'calls', message: 'No calls today' } }];\n}\n\nconst grouped = {};\nfor (const item of items) {\n  const { id, filename, lead_id, transcript_text } = item.json;\n  if (!id || !lead_id) continue;\n  const lid = String(lead_id);\n  if (!grouped[lid]) grouped[lid] = { lead_id: lid, calls: [], dataset_id: datasetMap[lid] || null };\n  grouped[lid].calls.push({ id, filename, text: (transcript_text || '').slice(0, 30000) });\n}\n\nreturn Object.values(grouped).map(g => ({ json: g }));"
       },
-      "id": "prepare-calls",
-      "name": "Prepare Calls",
+      "id": "group-calls",
+      "name": "Group Calls by Lead",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -448,
-        112
-      ]
+      "position": [880, 100]
     },
+
     {
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const chats = $input.all();\nconst results = [];\nfor (const chat of chats) {\n  const { lead_id, chat_title, chat_text, msg_count } = chat.json;\n  const truncated = (chat_text || '').length > 50000 ? chat_text.slice(0, 50000) + '\\n...[обрезано]' : (chat_text || '');\n  results.push({ json: { type: 'chat', lead_id: String(lead_id), chat_title, msg_count, content: truncated } });\n}\nreturn results.length > 0 ? results : [{ json: { type: 'chat', lead_id: null, empty: true } }];"
+        "jsCode": "// Group chat messages by lead_id, attach dataset_id\nconst items = $input.all();\nconst datasetMap = $('Build Dataset Map').first().json.datasetMap || {};\n\nif (items.length === 0 || !items[0].json.lead_id) {\n  return [{ json: { _skip: true, type: 'chats', message: 'No chats today' } }];\n}\n\nconst grouped = {};\nfor (const item of items) {\n  const { lead_id, chat_title, sender, message_text, message_date } = item.json;\n  if (!lead_id) continue;\n  const lid = String(lead_id);\n  if (!grouped[lid]) grouped[lid] = { lead_id: lid, chat_title: chat_title || '', messages: [], dataset_id: datasetMap[lid] || null };\n  grouped[lid].messages.push(`[${message_date}] ${sender}: ${message_text}`);\n}\n\nreturn Object.values(grouped).map(g => ({\n  json: {\n    lead_id: g.lead_id,\n    chat_title: g.chat_title,\n    dataset_id: g.dataset_id,\n    content: g.messages.slice(0, 200).join('\\n'),\n    message_count: g.messages.length\n  }\n}));"
       },
-      "id": "prepare-chats",
-      "name": "Prepare Chats",
+      "id": "group-chats",
+      "name": "Group Chats by Lead",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -448,
-        304
-      ]
+      "position": [880, 500]
     },
+
     {
       "parameters": {
         "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "id": "not-empty",
-              "leftValue": "={{ $json.empty }}",
-              "rightValue": true,
-              "operator": {
-                "type": "boolean",
-                "operation": "equal"
-              }
-            }
-          ],
-          "combinator": "any"
-        },
-        "options": {}
+          "conditions": [{ "leftValue": "={{ $json._skip }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equal" } }],
+          "combinator": "and"
+        }
       },
-      "id": "has-calls",
-      "name": "Has Calls?",
+      "id": "skip-calls",
+      "name": "Skip Calls?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [
-        -224,
-        112
-      ]
+      "position": [1100, 100]
     },
+
     {
       "parameters": {
         "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "id": "not-empty",
-              "leftValue": "={{ $json.empty }}",
-              "rightValue": true,
-              "operator": {
-                "type": "boolean",
-                "operation": "equal"
-              }
-            }
-          ],
-          "combinator": "any"
-        },
-        "options": {}
+          "conditions": [{ "leftValue": "={{ $json._skip }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equal" } }],
+          "combinator": "and"
+        }
       },
-      "id": "has-chats",
-      "name": "Has Chats?",
+      "id": "skip-chats",
+      "name": "Skip Chats?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [
-        -224,
-        304
-      ]
+      "position": [1100, 500]
     },
+
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS prompts (  name VARCHAR(100) PRIMARY KEY,  prompt_text TEXT NOT NULL,  last_result TEXT,  updated_at TIMESTAMP DEFAULT NOW());SELECT prompt_text FROM prompts WHERE name = 'call_summary_prompt' LIMIT 1;",
-        "options": {}
+        "jsCode": "// Build GLM-4 request for call summary\nconst { lead_id, calls, dataset_id } = $json;\nconst combined = calls.map((c, i) => `--- Звонок ${i+1} (${c.filename}) ---\\n${c.text}`).join('\\n\\n');\nconst callIds = calls.map(c => c.id);\n\nreturn [{ json: {\n  lead_id,\n  dataset_id,\n  call_ids: callIds,\n  content: combined,\n  source_type: 'call',\n  prompt: 'Ты бизнес-аналитик. Проанализируй транскрипцию(и) созвона с клиентом.\\nВыдай:\\n1) Краткое резюме (2-3 предл.)\\n2) Участники звонка\\n3) Ключевые договорённости\\n4) Action Items с дедлайнами (если есть)\\n5) Риски/проблемы\\n6) Тон клиента (позитивный/нейтральный/негативный)\\nФормат: Markdown. Не более 1500 слов.'\n} }];"
       },
-      "id": "load-call-prompt",
-      "name": "Load Call Prompt",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [
-        -56,
-        0
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      },
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS prompts (  name VARCHAR(100) PRIMARY KEY,  prompt_text TEXT NOT NULL,  last_result TEXT,  updated_at TIMESTAMP DEFAULT NOW());SELECT prompt_text FROM prompts WHERE name = 'chat_summary_prompt' LIMIT 1;",
-        "options": {}
-      },
-      "id": "load-chat-prompt",
-      "name": "Load Chat Prompt",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [
-        -56,
-        208
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      },
-      "continueOnFail": true
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const rows = $input.all();\nconst defaultPrompt = \"\\u0422\\u044b \\u0431\\u0438\\u0437\\u043d\\u0435\\u0441-\\u0430\\u043d\\u0430\\u043b\\u0438\\u0442\\u0438\\u043a. \\u041f\\u0440\\u043e\\u0430\\u043d\\u0430\\u043b\\u0438\\u0437\\u0438\\u0440\\u0443\\u0439 \\u0442\\u0440\\u0430\\u043d\\u0441\\u043a\\u0440\\u0438\\u043f\\u0446\\u0438\\u044e \\u0441\\u043e\\u0437\\u0432\\u043e\\u043d\\u0430 \\u0441 \\u043a\\u043b\\u0438\\u0435\\u043d\\u0442\\u043e\\u043c.\\n\\n\\u0412\\u042b\\u0425\\u041e\\u0414\\u041d\\u041e\\u0419 \\u0424\\u041e\\u0420\\u041c\\u0410\\u0422 (\\u0441\\u0442\\u0440\\u043e\\u0433\\u043e):\\n\\n## \\u041a\\u0440\\u0430\\u0442\\u043a\\u043e\\u0435 \\u0440\\u0435\\u0437\\u044e\\u043c\\u0435\\n[2-3 \\u043f\\u0440\\u0435\\u0434\\u043b\\u043e\\u0436\\u0435\\u043d\\u0438\\u044f \\u043e \\u0433\\u043b\\u0430\\u0432\\u043d\\u043e\\u043c]\\n\\n## \\u0423\\u0447\\u0430\\u0441\\u0442\\u043d\\u0438\\u043a\\u0438\\n- \\u041c\\u0435\\u043d\\u0435\\u0434\\u0436\\u0435\\u0440: [\\u0438\\u043c\\u044f]\\n- \\u041a\\u043b\\u0438\\u0435\\u043d\\u0442: [\\u043a\\u043e\\u043c\\u043f\\u0430\\u043d\\u0438\\u044f/\\u0438\\u043c\\u044f]\\n\\n## \\u041a\\u043b\\u044e\\u0447\\u0435\\u0432\\u044b\\u0435 \\u0434\\u043e\\u0433\\u043e\\u0432\\u043e\\u0440\\u0451\\u043d\\u043d\\u043e\\u0441\\u0442\\u0438\\n- [\\u043f\\u0443\\u043d\\u043a\\u0442]\\n\\n## Action Items\\n- [ ] [\\u0437\\u0430\\u0434\\u0430\\u0447\\u0430] \\u2014 [\\u043e\\u0442\\u0432\\u0435\\u0442\\u0441\\u0442\\u0432\\u0435\\u043d\\u043d\\u044b\\u0439] \\u2014 [\\u0434\\u0435\\u0434\\u043b\\u0430\\u0439\\u043d]\\n\\n## \\u0420\\u0438\\u0441\\u043a\\u0438 \\u0438 \\u0431\\u043b\\u043e\\u043a\\u0435\\u0440\\u044b\\n- [\\u0440\\u0438\\u0441\\u043a \\u0438\\u043b\\u0438 \\u041d\\u0435\\u0442]\\n\\n## \\u0421\\u043b\\u0435\\u0434\\u0443\\u044e\\u0449\\u0438\\u0435 \\u0448\\u0430\\u0433\\u0438\\n- [\\u0447\\u0442\\u043e \\u0434\\u0435\\u043b\\u0430\\u0442\\u044c \\u0434\\u0430\\u043b\\u044c\\u0448\\u0435]\\n\\n## \\u0412\\u0430\\u0436\\u043d\\u044b\\u0435 \\u0446\\u0438\\u0442\\u0430\\u0442\\u044b \\u043a\\u043b\\u0438\\u0435\\u043d\\u0442\\u0430\\n> [\\u0446\\u0438\\u0442\\u0430\\u0442\\u0430 \\u0438\\u043b\\u0438 \\u043d\\u0435\\u0442 \\u0446\\u0438\\u0442\\u0430\\u0442]\";\nconst callItem = $('Prepare Calls').item.json;\nconst promptRow = rows.find(r => r.json && r.json.prompt_text);\nconst systemPrompt = promptRow ? promptRow.json.prompt_text : defaultPrompt;\nreturn [{ json: { ...callItem, systemPrompt } }];"
-      },
-      "id": "inject-call-prompt",
-      "name": "Inject Call Prompt",
+      "id": "prep-call-glm",
+      "name": "Prepare Call GLM Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        164,
-        0
-      ]
+      "position": [1300, 0]
     },
+
     {
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const rows = $input.all();\nconst defaultPrompt = \"\\u0422\\u044b \\u0431\\u0438\\u0437\\u043d\\u0435\\u0441-\\u0430\\u043d\\u0430\\u043b\\u0438\\u0442\\u0438\\u043a. \\u041f\\u0440\\u043e\\u0430\\u043d\\u0430\\u043b\\u0438\\u0437\\u0438\\u0440\\u0443\\u0439 \\u0438\\u0441\\u0442\\u043e\\u0440\\u0438\\u044e \\u043f\\u0435\\u0440\\u0435\\u043f\\u0438\\u0441\\u043a\\u0438 \\u0441 \\u043a\\u043b\\u0438\\u0435\\u043d\\u0442\\u043e\\u043c \\u0432 Telegram.\\n\\n\\u0412\\u042b\\u0425\\u041e\\u0414\\u041d\\u041e\\u0419 \\u0424\\u041e\\u0420\\u041c\\u0410\\u0422 (\\u0441\\u0442\\u0440\\u043e\\u0433\\u043e):\\n\\n## \\u041f\\u0435\\u0440\\u0438\\u043e\\u0434 \\u043e\\u0431\\u0449\\u0435\\u043d\\u0438\\u044f\\n[\\u0434\\u0430\\u0442\\u044b \\u043f\\u0435\\u0440\\u0432\\u043e\\u0439 \\u0438 \\u043f\\u043e\\u0441\\u043b\\u0435\\u0434\\u043d\\u0435\\u0439 \\u043f\\u0435\\u0440\\u0435\\u043f\\u0438\\u0441\\u043a\\u0438]\\n\\n## \\u041e\\u0441\\u043d\\u043e\\u0432\\u043d\\u044b\\u0435 \\u0442\\u0435\\u043c\\u044b\\n- [\\u0442\\u0435\\u043c\\u0430]\\n\\n## \\u041a\\u043b\\u044e\\u0447\\u0435\\u0432\\u044b\\u0435 \\u0434\\u043e\\u0433\\u043e\\u0432\\u043e\\u0440\\u0451\\u043d\\u043d\\u043e\\u0441\\u0442\\u0438\\n- [\\u043f\\u0443\\u043d\\u043a\\u0442 \\u0438\\u043b\\u0438 \\u041d\\u0435 \\u0437\\u0430\\u0444\\u0438\\u043a\\u0441\\u0438\\u0440\\u043e\\u0432\\u0430\\u043d\\u043e]\\n\\n## Open questions (\\u0432\\u043e\\u043f\\u0440\\u043e\\u0441\\u044b \\u0431\\u0435\\u0437 \\u043e\\u0442\\u0432\\u0435\\u0442\\u0430)\\n- [\\u0432\\u043e\\u043f\\u0440\\u043e\\u0441 \\u0438\\u043b\\u0438 \\u041d\\u0435\\u0442]\\n\\n## \\u0422\\u043e\\u043d \\u043a\\u043b\\u0438\\u0435\\u043d\\u0442\\u0430\\n[\\u043f\\u043e\\u0437\\u0438\\u0442\\u0438\\u0432\\u043d\\u044b\\u0439/\\u043d\\u0435\\u0439\\u0442\\u0440\\u0430\\u043b\\u044c\\u043d\\u044b\\u0439/\\u043d\\u0435\\u0433\\u0430\\u0442\\u0438\\u0432\\u043d\\u044b\\u0439 + \\u043f\\u0440\\u0438\\u0447\\u0438\\u043d\\u044b]\\n\\n## \\u0421\\u043b\\u0435\\u0434\\u0443\\u044e\\u0449\\u0438\\u0435 \\u0448\\u0430\\u0433\\u0438\\n- [\\u0447\\u0442\\u043e \\u043d\\u0443\\u0436\\u043d\\u043e \\u0441\\u0434\\u0435\\u043b\\u0430\\u0442\\u044c]\";\nconst chatItem = $('Prepare Chats').item.json;\nconst promptRow = rows.find(r => r.json && r.json.prompt_text);\nconst systemPrompt = promptRow ? promptRow.json.prompt_text : defaultPrompt;\nreturn [{ json: { ...chatItem, systemPrompt } }];"
+        "jsCode": "// Build GLM-4 request for chat summary\nconst { lead_id, chat_title, dataset_id, content, message_count } = $json;\n\nreturn [{ json: {\n  lead_id,\n  dataset_id,\n  content,\n  source_type: 'chat',\n  chat_title,\n  message_count,\n  prompt: 'Ты куратор клиентского отдела. Проанализируй переписку с клиентом в Telegram за сегодня.\\nВыдай:\\n1) Краткое резюме (2-3 предл.)\\n2) Ключевые вопросы клиента\\n3) Решённые вопросы ✅\\n4) Нерешённые вопросы ❓\\n5) Action Items (если есть)\\n6) Общий тон клиента\\nФормат: Markdown.'\n} }];"
       },
-      "id": "inject-chat-prompt",
-      "name": "Inject Chat Prompt",
+      "id": "prep-chat-glm",
+      "name": "Prepare Chat GLM Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        164,
-        208
-      ]
+      "position": [1300, 400]
     },
+
     {
       "parameters": {
         "method": "POST",
@@ -234,32 +141,23 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.content }], temperature: 0.2, max_tokens: 1500, stream: false, thinking: { type: 'disabled' } }) }}",
-        "options": {
-          "timeout": 120000
-        }
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4-flash', messages: [{ role: 'system', content: $json.prompt }, { role: 'user', content: $json.content }], temperature: 0.3, max_tokens: 2000, thinking: { type: 'disabled' } }) }}",
+        "options": { "timeout": 120000 }
       },
-      "id": "glm-call",
-      "name": "GLM-4: Summarize Call",
+      "id": "glm-calls",
+      "name": "GLM-4 Call Summary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        384,
-        0
-      ]
+      "position": [1520, 0],
+      "continueOnFail": true
     },
+
     {
       "parameters": {
         "method": "POST",
@@ -267,292 +165,237 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.content }], temperature: 0.2, max_tokens: 1200, stream: false, thinking: { type: 'disabled' } }) }}",
-        "options": {
-          "timeout": 120000
-        }
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4-flash', messages: [{ role: 'system', content: $json.prompt }, { role: 'user', content: $json.content }], temperature: 0.3, max_tokens: 2000, thinking: { type: 'disabled' } }) }}",
+        "options": { "timeout": 120000 }
       },
-      "id": "glm-chat",
-      "name": "GLM-4: Summarize Chat",
+      "id": "glm-chats",
+      "name": "GLM-4 Chat Summary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        384,
-        208
-      ]
+      "position": [1520, 400],
+      "continueOnFail": true
     },
+
     {
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const glmResponse = $json;\nconst prevItem = $('Inject Call Prompt').item.json;\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst rawReasoning = (msg.reasoning_content || '').trim();\nconst summaryText = rawContent || rawReasoning || 'Summary не получено.';\nconst dateStr = new Date().toISOString().slice(0, 10);\nconst filename = `LEAD-${prevItem.lead_id}_call_${prevItem.time_str}_${dateStr}.md`;\nreturn { json: { type: 'call', lead_id: prevItem.lead_id, source_id: prevItem.source_id, summary_text: summaryText, filename, summary_date: dateStr } };"
+        "jsCode": "// Extract summary from GLM response for calls\nconst glmResp = $json;\nconst prev = $('Prepare Call GLM Request').first().json;\nconst msg = glmResp.choices?.[0]?.message || {};\nconst summary = (msg.content || msg.reasoning_content || 'Ошибка генерации').trim();\nconst dateStr = new Date().toISOString().slice(0, 10);\nconst callsInfo = prev.call_ids?.length > 1 ? `${prev.call_ids.length} звонка` : '1 звонок';\n\nreturn [{ json: {\n  lead_id: prev.lead_id,\n  dataset_id: prev.dataset_id,\n  call_ids: prev.call_ids,\n  source_type: 'call',\n  summary,\n  filename: `LEAD-${prev.lead_id}_call_${dateStr}.md`,\n  doc_name: `[${dateStr}] LEAD-${prev.lead_id} — Созвоны (${callsInfo})`,\n  date: dateStr\n} }];"
       },
       "id": "extract-call-summary",
       "name": "Extract Call Summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        608,
-        0
-      ]
+      "position": [1740, 0]
     },
+
     {
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const glmResponse = $json;\nconst prevItem = $('Inject Chat Prompt').item.json;\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst rawReasoning = (msg.reasoning_content || '').trim();\nconst summaryText = rawContent || rawReasoning || 'Summary не получено.';\nconst dateStr = new Date().toISOString().slice(0, 10);\nconst filename = `LEAD-${prevItem.lead_id}_chat_${dateStr}.md`;\nreturn { json: { type: 'chat', lead_id: prevItem.lead_id, source_id: 0, summary_text: summaryText, filename, summary_date: dateStr } };"
+        "jsCode": "// Extract summary from GLM response for chats\nconst glmResp = $json;\nconst prev = $('Prepare Chat GLM Request').first().json;\nconst msg = glmResp.choices?.[0]?.message || {};\nconst summary = (msg.content || msg.reasoning_content || 'Ошибка генерации').trim();\nconst dateStr = new Date().toISOString().slice(0, 10);\n\nreturn [{ json: {\n  lead_id: prev.lead_id,\n  dataset_id: prev.dataset_id,\n  source_type: 'chat',\n  chat_title: prev.chat_title,\n  message_count: prev.message_count,\n  summary,\n  filename: `LEAD-${prev.lead_id}_chat_${dateStr}.md`,\n  doc_name: `[${dateStr}] LEAD-${prev.lead_id} — Telegram-чат (${prev.message_count} сообщ.)`,\n  date: dateStr\n} }];"
       },
       "id": "extract-chat-summary",
       "name": "Extract Chat Summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        608,
-        208
-      ]
+      "position": [1740, 400]
     },
+
+    {
+      "parameters": {
+        "jsCode": "// Push to Dify: use per-client dataset_id if available, else fallback to env\nconst { dataset_id, doc_name, summary } = $json;\nconst effectiveDatasetId = dataset_id || $env.DIFY_DATASET_ID;\nreturn [{ json: { ...$json, effective_dataset_id: effectiveDatasetId, ready: true } }];"
+      },
+      "id": "resolve-call-dataset",
+      "name": "Resolve Call Dataset",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 0]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const { dataset_id, doc_name, summary } = $json;\nconst effectiveDatasetId = dataset_id || $env.DIFY_DATASET_ID;\nreturn [{ json: { ...$json, effective_dataset_id: effectiveDatasetId, ready: true } }];"
+      },
+      "id": "resolve-chat-dataset",
+      "name": "Resolve Chat Dataset",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 400]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DIFY_BASE_URL + '/v1/datasets/' + $json.effective_dataset_id + '/document/create-by-text' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.DIFY_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.doc_name, text: $json.summary, indexing_technique: 'high_quality', process_rule: { mode: 'automatic' } }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "push-call-dify",
+      "name": "Push Call to Dify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2180, 0],
+      "continueOnFail": true
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DIFY_BASE_URL + '/v1/datasets/' + $json.effective_dataset_id + '/document/create-by-text' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.DIFY_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.doc_name, text: $json.summary, indexing_technique: 'high_quality', process_rule: { mode: 'automatic' } }) }}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "push-chat-dify",
+      "name": "Push Chat to Dify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2180, 400],
+      "continueOnFail": true
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Save call summary to DB + mark dify_doc_id\nconst difyResp = $json;\nconst prev = $('Resolve Call Dataset').first().json;\nconst docId = difyResp.document?.id || difyResp.id || '';\n\nreturn [{ json: {\n  lead_id: prev.lead_id,\n  source_type: 'call',\n  call_ids: prev.call_ids,\n  summary: prev.summary,\n  date: prev.date,\n  dify_doc_id: docId,\n  filename: prev.filename\n} }];"
+      },
+      "id": "prep-call-db",
+      "name": "Prep Call DB Save",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 0]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const difyResp = $json;\nconst prev = $('Resolve Chat Dataset').first().json;\nconst docId = difyResp.document?.id || difyResp.id || '';\n\nreturn [{ json: {\n  lead_id: prev.lead_id,\n  source_type: 'chat',\n  summary: prev.summary,\n  date: prev.date,\n  dify_doc_id: docId,\n  filename: prev.filename\n} }];"
+      },
+      "id": "prep-chat-db",
+      "name": "Prep Chat DB Save",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 400]
+    },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO client_summaries (lead_id, source_type, source_id, summary_text, summary_date) VALUES ($1, $2, $3, $4, $5::date)",
+        "query": "INSERT INTO client_summaries (lead_id, source_type, summary_text, summary_date) VALUES ($1, $2, $3, $4::date) RETURNING id",
         "options": {
-          "queryReplacement": "={{ $json.lead_id }}||={{ $json.type }}||={{ $json.source_id }}||={{ $json.summary_text.replace(/'/g, \"''\") }}||={{ $json.summary_date }}"
+          "queryReplacement": "={{ $json.lead_id }}||={{ $json.source_type }}||={{ $json.summary }}||={{ $json.date }}"
         }
       },
       "id": "save-call-summary",
-      "name": "Save Call Summary to DB",
+      "name": "Save Call Summary",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [
-        832,
-        0
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
-        }
-      }
+      "position": [2620, 0],
+      "continueOnFail": true,
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO client_summaries (lead_id, source_type, source_id, summary_text, summary_date) VALUES ($1, $2, $3, $4, $5::date)",
+        "query": "INSERT INTO client_summaries (lead_id, source_type, summary_text, summary_date) VALUES ($1, $2, $3, $4::date) RETURNING id",
         "options": {
-          "queryReplacement": "={{ $json.lead_id }}||={{ $json.type }}||={{ $json.source_id }}||={{ $json.summary_text.replace(/'/g, \"''\") }}||={{ $json.summary_date }}"
+          "queryReplacement": "={{ $json.lead_id }}||={{ $json.source_type }}||={{ $json.summary }}||={{ $json.date }}"
         }
       },
       "id": "save-chat-summary",
-      "name": "Save Chat Summary to DB",
+      "name": "Save Chat Summary",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [
-        832,
-        208
-      ],
-      "credentials": {
-        "postgres": {
-          "id": "F3beGLVPdqgBpqlv",
-          "name": "PostgreSQL"
+      "position": [2620, 400],
+      "continueOnFail": true,
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE processed_files SET dify_doc_id = $1, summary_text = $2 WHERE id = ANY($3::int[])",
+        "options": {
+          "queryReplacement": "={{ $('Prep Call DB Save').first().json.dify_doc_id }}||={{ $('Prep Call DB Save').first().json.summary }}||={{ '{' + ($('Prep Call DB Save').first().json.call_ids || []).join(',') + '}' }}"
         }
-      }
+      },
+      "id": "update-processed-files",
+      "name": "Update Processed Files",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2840, 0],
+      "continueOnFail": true,
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE chat_messages SET summary_sent = true WHERE lead_id = $1 AND DATE(message_date) = CURRENT_DATE",
+        "options": {
+          "queryReplacement": "={{ $('Prep Chat DB Save').first().json.lead_id }}"
+        }
+      },
+      "id": "mark-chat-sent",
+      "name": "Mark Chat Messages Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2840, 400],
+      "continueOnFail": true,
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     }
   ],
   "connections": {
-    "Daily 22:00": {
-      "main": [
-        [
-          {
-            "node": "Load Today's Calls",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Load Today's Chats",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Daily 22:00": { "main": [[{ "node": "Load Client Dataset Map", "type": "main", "index": 0 }]] },
+    "Load Client Dataset Map": { "main": [[{ "node": "Build Dataset Map", "type": "main", "index": 0 }]] },
+    "Build Dataset Map": {
+      "main": [[
+        { "node": "Load Today's Calls", "type": "main", "index": 0 },
+        { "node": "Load Today's Chats", "type": "main", "index": 0 }
+      ]]
     },
-    "Load Today's Calls": {
-      "main": [
-        [
-          {
-            "node": "Prepare Calls",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Load Today's Chats": {
-      "main": [
-        [
-          {
-            "node": "Prepare Chats",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare Calls": {
-      "main": [
-        [
-          {
-            "node": "Has Calls?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare Chats": {
-      "main": [
-        [
-          {
-            "node": "Has Chats?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Has Calls?": {
-      "main": [
-        [],
-        [
-          {
-            "node": "Load Call Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Has Chats?": {
-      "main": [
-        [],
-        [
-          {
-            "node": "Load Chat Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Load Call Prompt": {
-      "main": [
-        [
-          {
-            "node": "Inject Call Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Load Chat Prompt": {
-      "main": [
-        [
-          {
-            "node": "Inject Chat Prompt",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Inject Call Prompt": {
-      "main": [
-        [
-          {
-            "node": "GLM-4: Summarize Call",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Inject Chat Prompt": {
-      "main": [
-        [
-          {
-            "node": "GLM-4: Summarize Chat",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "GLM-4: Summarize Call": {
-      "main": [
-        [
-          {
-            "node": "Extract Call Summary",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "GLM-4: Summarize Chat": {
-      "main": [
-        [
-          {
-            "node": "Extract Chat Summary",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Extract Call Summary": {
-      "main": [
-        [
-          {
-            "node": "Save Call Summary to DB",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Extract Chat Summary": {
-      "main": [
-        [
-          {
-            "node": "Save Chat Summary to DB",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    }
+    "Load Today's Calls":  { "main": [[{ "node": "Group Calls by Lead", "type": "main", "index": 0 }]] },
+    "Load Today's Chats":  { "main": [[{ "node": "Group Chats by Lead", "type": "main", "index": 0 }]] },
+    "Group Calls by Lead": { "main": [[{ "node": "Skip Calls?", "type": "main", "index": 0 }]] },
+    "Group Chats by Lead": { "main": [[{ "node": "Skip Chats?", "type": "main", "index": 0 }]] },
+    "Skip Calls?": { "main": [[], [{ "node": "Prepare Call GLM Request", "type": "main", "index": 0 }]] },
+    "Skip Chats?": { "main": [[], [{ "node": "Prepare Chat GLM Request", "type": "main", "index": 0 }]] },
+    "Prepare Call GLM Request": { "main": [[{ "node": "GLM-4 Call Summary", "type": "main", "index": 0 }]] },
+    "Prepare Chat GLM Request": { "main": [[{ "node": "GLM-4 Chat Summary", "type": "main", "index": 0 }]] },
+    "GLM-4 Call Summary": { "main": [[{ "node": "Extract Call Summary", "type": "main", "index": 0 }]] },
+    "GLM-4 Chat Summary": { "main": [[{ "node": "Extract Chat Summary", "type": "main", "index": 0 }]] },
+    "Extract Call Summary": { "main": [[{ "node": "Resolve Call Dataset", "type": "main", "index": 0 }]] },
+    "Extract Chat Summary": { "main": [[{ "node": "Resolve Chat Dataset", "type": "main", "index": 0 }]] },
+    "Resolve Call Dataset": { "main": [[{ "node": "Push Call to Dify", "type": "main", "index": 0 }]] },
+    "Resolve Chat Dataset": { "main": [[{ "node": "Push Chat to Dify", "type": "main", "index": 0 }]] },
+    "Push Call to Dify": { "main": [[{ "node": "Prep Call DB Save", "type": "main", "index": 0 }]] },
+    "Push Chat to Dify": { "main": [[{ "node": "Prep Chat DB Save", "type": "main", "index": 0 }]] },
+    "Prep Call DB Save": { "main": [[{ "node": "Save Call Summary", "type": "main", "index": 0 }]] },
+    "Prep Chat DB Save": { "main": [[{ "node": "Save Chat Summary", "type": "main", "index": 0 }]] },
+    "Save Call Summary": { "main": [[{ "node": "Update Processed Files", "type": "main", "index": 0 }]] },
+    "Save Chat Summary": { "main": [[{ "node": "Mark Chat Messages Sent", "type": "main", "index": 0 }]] }
   },
-  "settings": {
-    "executionOrder": "v1",
-    "timezone": "Europe/Moscow"
-  },
+  "settings": { "executionOrder": "v1", "timezone": "Europe/Moscow" },
   "staticData": null,
-  "tags": [
-    {
-      "name": "MVP Auto-Summary"
-    }
-  ],
-  "triggerCount": 2
+  "tags": [{ "name": "MVP Auto-Summary" }],
+  "triggerCount": 0
 }

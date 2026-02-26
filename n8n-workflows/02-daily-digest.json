@@ -1,5 +1,5 @@
 {
-  "name": "02 — Daily Digest → GLM-4 → Telegram",
+  "name": "02 — Daily Digest → GLM-4 → Telegram (with links)",
   "nodes": [
     {
       "parameters": {
@@ -13,10 +13,11 @@
       "typeVersion": 1.2,
       "position": [0, 0]
     },
+
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT id, lead_id, transcript_text FROM v_today_completed WHERE summary_sent = false AND transcript_text IS NOT NULL",
+        "query": "SELECT pf.id, pf.lead_id, pf.transcript_text, pf.filename, lcm.lead_name, lcm.curators FROM processed_files pf LEFT JOIN lead_chat_mapping lcm ON lcm.lead_id = pf.lead_id WHERE COALESCE(pf.summary_sent, false) = false AND pf.transcript_text IS NOT NULL AND COALESCE(pf.file_date, pf.completed_at::date, pf.created_at::date) = CURRENT_DATE ORDER BY pf.lead_id",
         "options": {}
       },
       "id": "load-today",
@@ -26,10 +27,25 @@
       "position": [220, 0],
       "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT cs.lead_id, cs.source_type, cs.summary_text, cs.summary_date, lcm.lead_name, lcm.curators FROM client_summaries cs LEFT JOIN lead_chat_mapping lcm ON lcm.lead_id = cs.lead_id WHERE cs.summary_date = CURRENT_DATE ORDER BY cs.lead_id, cs.source_type",
+        "options": {}
+      },
+      "id": "load-summaries",
+      "name": "Load Today's Summaries",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 200],
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const items = $input.all();\n\nif (items.length === 0) {\n  return [{ json: { hasData: false } }];\n}\n\nconst dateLabel = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' });\nconst MAX_CHARS = 50000;\nconst sections = [];\nlet totalLen = 0;\nlet truncated = false;\n\nfor (const item of items) {\n  const leadId = item.json.lead_id || 'unknown';\n  const transcript = item.json.transcript_text || '';\n  const section = `LEAD-${leadId}:\\n${transcript}`;\n  \n  if (totalLen + section.length > MAX_CHARS) {\n    truncated = true;\n    break;\n  }\n  sections.push(section);\n  totalLen += section.length;\n}\n\nconst combined = sections.join('\\n\\n---\\n\\n') + (truncated ? '\\n\\n[...обрезано, слишком много текста за день...]' : '');\nconst rowIds = items.slice(0, sections.length).map((item) => item.json.id);\nconst leadIds = Array.from(new Set(items.slice(0, sections.length).map((item) => item.json.lead_id).filter((v) => v !== null && v !== undefined)));\n\nreturn [{\n  json: {\n    hasData: true,\n    dateLabel,\n    combined,\n    rowIds,\n    leadIds,\n    count: sections.length,\n    truncated\n  }\n}];"
+        "jsCode": "// Aggregate transcripts for GLM-4\nconst items = $input.all();\n\nif (items.length === 0) {\n  return [{ json: { hasData: false, combined: '', rowIds: [], leadIds: [], count: 0 } }];\n}\n\nconst dateLabel = new Date().toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' });\nconst MAX_CHARS = 50000;\nconst sections = [];\nlet totalLen = 0;\nlet truncated = false;\n\n// Group by lead_id\nconst byLead = {};\nfor (const item of items) {\n  const { lead_id, lead_name, curators, transcript_text, filename } = item.json;\n  if (!lead_id) continue;\n  const lid = String(lead_id);\n  if (!byLead[lid]) byLead[lid] = { lead_id: lid, lead_name: lead_name || `ФФ-${lid}`, curators: curators || '', calls: [] };\n  byLead[lid].calls.push(transcript_text || '');\n}\n\nfor (const lid of Object.keys(byLead)) {\n  const g = byLead[lid];\n  const section = `=== LEAD-${lid} (${g.lead_name}) ===\\n${g.calls.join('\\n---\\n')}`;\n  if (totalLen + section.length > MAX_CHARS) { truncated = true; break; }\n  sections.push(section);\n  totalLen += section.length;\n}\n\nconst combined = sections.join('\\n\\n') + (truncated ? '\\n\\n[...обрезано...]' : '');\nconst rowIds = items.slice(0, sections.length).map(i => i.json.id);\nconst leadIds = Array.from(new Set(items.map(i => String(i.json.lead_id)).filter(Boolean)));\n\nreturn [{ json: { hasData: true, dateLabel, combined, rowIds, leadIds, count: sections.length, truncated } }];"
       },
       "id": "aggregate-transcripts",
       "name": "Aggregate Transcripts",
@@ -37,18 +53,23 @@
       "typeVersion": 2,
       "position": [440, 0]
     },
+
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Build per-client summary links\nconst items = $input.all();\nconst dateStr = new Date().toISOString().slice(0, 10);\nconst SERVER = 'http://84.252.100.93';\nconst DIFY_APP_URL = (process.env.DIFY_CHATBOT_URL || `${SERVER}:8080`);\n\n// Group by lead_id\nconst byLead = {};\nfor (const item of items) {\n  const { lead_id, source_type, lead_name, curators } = item.json;\n  if (!lead_id) continue;\n  const lid = String(lead_id);\n  if (!byLead[lid]) byLead[lid] = { lead_id: lid, lead_name: lead_name || `ФФ-${lid}`, curators: curators || '', has_call: false, has_chat: false };\n  if (source_type === 'call') byLead[lid].has_call = true;\n  if (source_type === 'chat') byLead[lid].has_chat = true;\n}\n\n// Build links block for Telegram message\nconst linkLines = [];\nfor (const lid of Object.keys(byLead)) {\n  const g = byLead[lid];\n  const links = [];\n  if (g.has_call) links.push(`<a href=\"${SERVER}:8080/summaries/${dateStr}/LEAD-${lid}_call_${dateStr}.md\">созвон</a>`);\n  if (g.has_chat) links.push(`<a href=\"${SERVER}:8080/summaries/${dateStr}/LEAD-${lid}_chat_${dateStr}.md\">чат</a>`);\n  const ragLink = `<a href=\"${DIFY_APP_URL}\">RAG↗</a>`;\n  linkLines.push(`  <b>LEAD-${lid}</b> ${g.lead_name}: ${links.join(', ')} | ${ragLink}`);\n}\n\nreturn [{ json: { linkBlock: linkLines.join('\\n'), leadCount: linkLines.length, dateStr } }];"
+      },
+      "id": "build-links",
+      "name": "Build Summary Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 200]
+    },
+
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
-          "conditions": [
-            {
-              "id": "has-data",
-              "leftValue": "={{ $json.combined }}",
-              "rightValue": "",
-              "operator": { "type": "string", "operation": "notEmpty" }
-            }
-          ],
+          "conditions": [{ "leftValue": "={{ $json.combined }}", "rightValue": "", "operator": { "type": "string", "operation": "notEmpty" } }],
           "combinator": "and"
         }
       },
@@ -58,13 +79,40 @@
       "typeVersion": 2,
       "position": [660, 0]
     },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS prompts (name VARCHAR(100) PRIMARY KEY, prompt_text TEXT NOT NULL, last_result TEXT, updated_at TIMESTAMP DEFAULT NOW(), version INTEGER DEFAULT 1, is_active BOOLEAN DEFAULT true, created_by VARCHAR(100)); WITH prompt AS (SELECT prompt_text FROM prompts WHERE name = 'digest_prompt' AND is_active = true ORDER BY version DESC LIMIT 1) SELECT COALESCE((SELECT prompt_text FROM prompt), '') AS prompt_text;",
+        "options": {}
+      },
+      "id": "load-digest-prompt",
+      "name": "Load Digest Prompt",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 60],
+      "continueOnFail": true,
+      "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const promptRows = $input.all();\nconst meta = $('Aggregate Transcripts').first().json;\n\nconst fallbackPrompt = 'Ты бизнес-аналитик. Сформируй ежедневный дайджест по стенограммам встреч.\\n\\nФОРМАТ (строго HTML без Markdown):\\n1) <b>Резюме дня</b> (3-5 предложений)\\n2) <b>Ключевые договорённости</b> (буллеты)\\n3) <b>Action items</b> (буллет, ответственный, срок)\\n4) <b>Риски/блокеры</b> (или Нет)\\n5) По каждому LEAD-ID: 1-2 ключевых пункта\\n\\nМаксимум 3000 символов. Используй HTML-теги (<b>, <i>), НЕ Markdown.';\n\nconst promptText = promptRows.map(r => r.json?.prompt_text).find(v => typeof v === 'string' && v.trim().length > 0);\nconst systemPrompt = promptText ? promptText.trim() : fallbackPrompt;\n\nreturn [{ json: { ...meta, systemPrompt } }];"
+      },
+      "id": "prepare-glm",
+      "name": "Prepare GLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 60]
+    },
+
     {
       "parameters": {
         "method": "POST",
         "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [ { role: 'system', content: 'Ты бизнес-аналитик. Сформируй ежедневный дайджест по стенограммам встреч. Формат: 1) Краткое резюме дня (3-5 предложений). 2) Ключевые договоренности (буллеты). 3) Action items (буллеты с ответственным, если есть). 4) Риски/блокеры (буллеты или Нет). 5) Клиенты/LEAD: перечисли LEAD-ID, по каждому 1-2 ключевых пункта. Ограничение: до 3500 символов.' }, { role: 'user', content: $json.combined } ], temperature: 0.2, max_tokens: 1400, stream: false, thinking: { type: 'disabled' } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.combined }], temperature: 0.2, max_tokens: 1400, stream: false, thinking: { type: 'disabled' } }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -80,9 +128,10 @@
       "typeVersion": 4.2,
       "position": [880, -120]
     },
+
     {
       "parameters": {
-        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst glmResponse = $json;\n\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst rawReasoning = (msg.reasoning_content || '').trim();\nconst content = rawContent || rawReasoning || 'Сводка не получена.';\n\nconst leadList = Array.isArray(meta.leadIds) && meta.leadIds.length > 0 ? meta.leadIds.map((id) => `LEAD-${id}`).join(', ') : '—';\nconst header = `Ежедневный дайджест за ${meta.dateLabel}\\nВстреч: ${meta.count}\\nКлиенты: ${leadList}`;\nconst digest = `${header}\\n\\n${content}`.trim();\n\nreturn [{\n  json: {\n    digest,\n    summaryText: content,\n    rowIds: meta.rowIds\n  }\n}];"
+        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst linksData = $('Build Summary Links').first().json;\nconst glmResponse = $json;\n\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst content = rawContent || 'Сводка не получена.';\n\nconst dateLabel = meta.dateLabel;\nconst leadList = (meta.leadIds || []).map(id => `LEAD-${id}`).join(', ') || '—';\n\n// Header\nconst header = `<b>📊 Дайджест за ${dateLabel}</b>\\nВстреч: ${meta.count} | Клиентов: ${(meta.leadIds||[]).length}`;\n\n// Summaries block\nconst linksBlock = linksData.linkBlock ? `\\n\\n<b>📂 Саммари и RAG:</b>\\n${linksData.linkBlock}` : '';\n\nconst digest = `${header}\\n\\n${content}${linksBlock}`.trim();\n\nreturn [{ json: { digest, summaryText: content, rowIds: meta.rowIds } }];"
       },
       "id": "build-digest",
       "name": "Build Digest",
@@ -90,9 +139,10 @@
       "typeVersion": 2,
       "position": [1100, -120]
     },
+
     {
       "parameters": {
-        "jsCode": "const text = $json.digest || '';\nconst max = 3500;\nconst chunks = [];\nfor (let i = 0; i < text.length; i += max) {\n  chunks.push(text.slice(i, i + max));\n}\n\nreturn chunks.map((chunk, index) => ({\n  json: {\n    text: chunks.length > 1 ? `${chunk}\\n\\n(часть ${index + 1}/${chunks.length})` : chunk,\n    part: index + 1,\n    total: chunks.length\n  }\n}));"
+        "jsCode": "const text = $json.digest || '';\nconst max = 4000;\nconst chunks = [];\nfor (let i = 0; i < text.length; i += max) {\n  chunks.push(text.slice(i, i + max));\n}\nreturn chunks.map((chunk, index) => ({\n  json: {\n    text: chunks.length > 1 ? `${chunk}\\n\\n(часть ${index + 1}/${chunks.length})` : chunk,\n    part: index + 1,\n    total: chunks.length\n  }\n}));"
       },
       "id": "chunk-telegram",
       "name": "Chunk for Telegram",
@@ -100,13 +150,14 @@
       "typeVersion": 2,
       "position": [1320, -120]
     },
+
     {
       "parameters": {
         "method": "POST",
         "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ chat_id: -1003872092456, text: $json.text, disable_web_page_preview: true }) }}",
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $env.TELEGRAM_CHAT_ID || -1003872092456, text: $json.text, disable_web_page_preview: false }) }}",
         "options": { "timeout": 60000 }
       },
       "id": "send-telegram",
@@ -115,6 +166,7 @@
       "typeVersion": 4.2,
       "position": [1540, -120]
     },
+
     {
       "parameters": {
         "mode": "runOnceForAllItems",
@@ -126,11 +178,14 @@
       "typeVersion": 2,
       "position": [1760, -120]
     },
+
     {
       "parameters": {
         "operation": "executeQuery",
         "query": "UPDATE processed_files SET summary_text = $1, summary_sent = true WHERE id = ANY($2::int[])",
-        "options": { "queryReplacement": "={{ $json.summaryText }}||={{ '{' + ($json.rowIds || []).join(',') + '}' }}" }
+        "options": {
+          "queryReplacement": "={{ $json.summaryText }}||={{ '{' + ($json.rowIds || []).join(',') + '}' }}"
+        }
       },
       "id": "mark-summary-sent",
       "name": "Mark Summary Sent",
@@ -138,23 +193,49 @@
       "typeVersion": 2.5,
       "position": [1980, -120],
       "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parse_mode: 'HTML', chat_id: $env.TELEGRAM_CHAT_ID || -1003872092456, text: '📊 <b>Дайджест ' + new Date().toLocaleDateString(\"ru-RU\") + '</b>\\n\\nСозвонов за день не было. Данные появятся после обработки записей.', disable_web_page_preview: true }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-no-data",
+      "name": "Send No Data Msg",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200]
     }
   ],
   "connections": {
-    "Daily 23:00": { "main": [[{ "node": "Load Today's Transcripts", "type": "main", "index": 0 }]] },
+    "Daily 23:00": {
+      "main": [[
+        { "node": "Load Today's Transcripts", "type": "main", "index": 0 },
+        { "node": "Load Today's Summaries", "type": "main", "index": 0 }
+      ]]
+    },
     "Load Today's Transcripts": { "main": [[{ "node": "Aggregate Transcripts", "type": "main", "index": 0 }]] },
+    "Load Today's Summaries":   { "main": [[{ "node": "Build Summary Links", "type": "main", "index": 0 }]] },
     "Aggregate Transcripts": { "main": [[{ "node": "Has Data?", "type": "main", "index": 0 }]] },
-    "Has Data?": { "main": [[{ "node": "GLM-4 Summarize", "type": "main", "index": 0 }], []] },
-    "GLM-4 Summarize": { "main": [[{ "node": "Build Digest", "type": "main", "index": 0 }]] },
-    "Build Digest": { "main": [[{ "node": "Chunk for Telegram", "type": "main", "index": 0 }]] },
+    "Has Data?": {
+      "main": [
+        [{ "node": "Load Digest Prompt", "type": "main", "index": 0 }],
+        [{ "node": "Send No Data Msg", "type": "main", "index": 0 }]
+      ]
+    },
+    "Load Digest Prompt": { "main": [[{ "node": "Prepare GLM", "type": "main", "index": 0 }]] },
+    "Prepare GLM":        { "main": [[{ "node": "GLM-4 Summarize", "type": "main", "index": 0 }]] },
+    "GLM-4 Summarize":    { "main": [[{ "node": "Build Digest", "type": "main", "index": 0 }]] },
+    "Build Digest":       { "main": [[{ "node": "Chunk for Telegram", "type": "main", "index": 0 }]] },
     "Chunk for Telegram": { "main": [[{ "node": "Send Telegram", "type": "main", "index": 0 }]] },
-    "Send Telegram": { "main": [[{ "node": "Collapse Chunks", "type": "main", "index": 0 }]] },
-    "Collapse Chunks": { "main": [[{ "node": "Mark Summary Sent", "type": "main", "index": 0 }]] }
+    "Send Telegram":      { "main": [[{ "node": "Collapse Chunks", "type": "main", "index": 0 }]] },
+    "Collapse Chunks":    { "main": [[{ "node": "Mark Summary Sent", "type": "main", "index": 0 }]] }
   },
-  "settings": {
-    "executionOrder": "v1",
-    "timezone": "Europe/Moscow"
-  },
+  "settings": { "executionOrder": "v1", "timezone": "Europe/Moscow" },
   "staticData": null,
   "tags": [{ "name": "MVP Auto-Summary" }],
   "triggerCount": 1
