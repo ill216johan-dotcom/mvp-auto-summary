@@ -2258,28 +2258,57 @@ n8n запускает их параллельно, но нода `Build Status`
 ### E100: Yandex SpeechKit отключён — transcribe-сервис не работает
 
 **Дата**: 2026-03-01  
-**Symptom**: `transcribe` контейнер не запускается или не отвечает на `/health`. Файлы `services/transcribe/` отсутствуют.  
-**Root Cause**: Yandex SpeechKit временно отключён для оптимизации расходов. Сервис `transcribe` (порт 9001) на паузе.  
-**Статус**: ⏸️ ПРИОСТАНОВЛЕН — будет возобновлён после анализа вариантов STT  
-**Следствие**: WF01 (New Recording) не будет транскрибировать файлы пока сервис отключён.
+**Symptom**: `transcribe` контейнер не запускается или не отвечает на `/health`. Файлы не транскрибируются.  
+**Root Cause**: Yandex SpeechKit временно отключён для оптимизации расходов.  
+**Тарификация SpeechKit**: каждые 15 сек аудио (округление вверх), 0.60₽/мин. Кодек и количество слов **не влияют** на цену.  
+**Статус**: ⏸️ ПРИОСТАНОВЛЕН, можно возобновить одной строкой в .env  
+**Следствие**: WF01 (новые записи не транскрибируются до возобновления STT).
 
-**Когда возобновлять**:
-- Вариант A: Вернуть Yandex SpeechKit (платно, ~25K руб/мес)
-- Вариант B: Использовать self-hosted Whisper (бесплатно, требует 3+ GB RAM)
-- Вариант C: OpenAI Whisper API (платно, ~$0.006/мин)
-
-**Временный workaround**: Ручная транскрипция через скрипт на сервере:
+**Где переключать**: в `.env` задать `STT_PROVIDER` и перезапустить `transcribe`:  
 ```bash
-# Прямой вызов Whisper если поднять контейнер вручную:
-docker run --rm -p 9000:9000 onerahmet/openai-whisper-asr-webservice:latest-cpu
-```
+# Вернуть SpeechKit:
+STT_PROVIDER=speechkit
+YANDEX_API_KEY=ВАШ_КЛЮЧ
+docker compose up -d --build transcribe
 
-**Fix (когда решат возобновить)**:
-```bash
-# В docker-compose.yml раскомментировать сервис transcribe или добавить whisper:
-docker compose up -d transcribe
+# Перейти на Whisper self-hosted:
+STT_PROVIDER=whisper
+docker compose --profile whisper up -d whisper  # сначала поднять whisper-сервис
+docker compose up -d --build transcribe
+
+# Перейти на AssemblyAI:
+STT_PROVIDER=assemblyai
+ASSEMBLYAI_API_KEY=ВАШ_КЛЮЧ
+docker compose up -d --build transcribe
 ```
 
 ---
 
-*Обновлено: 2026-03-01 — E100: Yandex SpeechKit отключён, transcribe на паузе.*
+### E101: STT_PROVIDER незнакомое значение (unknown provider)
+
+**Symptom**: `/health` возвращает 200 но транскрипция падает с `Unknown STT_PROVIDER`.  
+**Root Cause**: В `.env` задано `STT_PROVIDER=whisperr` (опечатка) или `STT_PROVIDER=WHISPER` (регистр)  
+**Fix**: Допустимые значения: `speechkit` | `whisper` | `assemblyai` (только строчные). Проверить:  
+```bash
+docker exec mvp-auto-summary-transcribe-1 curl -s http://localhost:9001/health
+# Ожидается: {"status": "ok", "provider": "whisper"}
+```
+
+---
+
+### E102: STT_PROVIDER=whisper — Whisper-сервис не запущен
+
+**Symptom**: transcribe падает с `Connection refused` при `WHISPER_URL=http://whisper:9000`  
+**Root Cause**: `whisper` сервис возможен через docker compose profile — он не запускается по умолчанию.  
+**Fix**:  
+```bash
+# Запустить whisper-сервис (скачает модель при первом запуске ~5 мин):
+docker compose --profile whisper up -d whisper
+# Проверить готовность:
+docker logs mvp-auto-summary-whisper-1 --tail=10
+# Ожидается: "Application startup complete" или "Model loaded"
+```
+
+---
+
+*Обновлено: 2026-03-01 — E100 обновлён (тарификация SpeechKit), добавлены E101-E102 (STT_PROVIDER ошибки).*

@@ -2,9 +2,9 @@
 # Usage: docker compose up -d
 # Docs: docs/SPECS.md
 #
-# NOTE: open-notebook + SurrealDB удалены 2026-02-26
+# Stack: n8n + PostgreSQL + transcribe (STT adapter) + Dify.ai (RAG) + summaries-nginx
+# STT: переключается через STT_PROVIDER=speechkit|whisper|assemblyai в .env
 # Причина: переход на Dify.ai для RAG (см. docs/ROADMAP_RAG_UI.md)
-# Добавлен: summaries-nginx (порт 8181) — раздача .md саммари как статику
 
 services:
 
@@ -37,16 +37,19 @@ services:
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       - N8N_ALLOWED_PATHS=/recordings,/home/node/.n8n-files,/summaries
       - NODES_EXCLUDE=
+      # --- Execution ---
       - EXECUTIONS_TIMEOUT=1800
       - EXECUTIONS_TIMEOUT_MAX=3600
+      # --- External API keys (accessible via $env in workflows) ---
       - GLM4_API_KEY=${GLM4_API_KEY}
-      - GLM4_BASE_URL=${GLM4_BASE_URL:-https://api.z.ai/api/paas/v4}
-      - GLM4_MODEL=${GLM4_MODEL:-glm-4.7-flashx}
+      - GLM4_BASE_URL=${GLM4_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      - GLM4_MODEL=${GLM4_MODEL:-glm-4.7-flash}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      # --- Dify.ai (RAG + Knowledge Base) ---
       - DIFY_API_KEY=${DIFY_API_KEY}
       - DIFY_DATASET_ID=${DIFY_DATASET_ID:-ba120e09-0119-438f-b6d6-884e73b73334}
-      - DIFY_BASE_URL=${DIFY_BASE_URL:-http://dify:5001}
+      - DIFY_BASE_URL=${DIFY_BASE_URL:-http://84.252.100.93:8080}
       - DIFY_CHATBOT_URL=${DIFY_CHATBOT_URL:-http://84.252.100.93:8080}
       - SUMMARIES_BASE_URL=${SUMMARIES_BASE_URL:-http://84.252.100.93:8181}
     depends_on:
@@ -75,13 +78,26 @@ services:
     networks:
       - mvp-network
 
+  # ============================================================
+  # transcribe — универсальный STT адаптер
+  # Провайдер: STT_PROVIDER=speechkit|whisper|assemblyai
+  # API: http://transcribe:9001
+  # ============================================================
   transcribe:
     build:
       context: ./services/transcribe
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      - YANDEX_API_KEY=${YANDEX_API_KEY}
+      # Активный провайдер STT (speechkit | whisper | assemblyai)
+      - STT_PROVIDER=${STT_PROVIDER:-speechkit}
+      # SpeechKit (Yandex) — нужен при STT_PROVIDER=speechkit
+      - YANDEX_API_KEY=${YANDEX_API_KEY:-}
+      # Whisper self-hosted — нужен при STT_PROVIDER=whisper
+      - WHISPER_URL=${WHISPER_URL:-http://whisper:9000}
+      # AssemblyAI — нужен при STT_PROVIDER=assemblyai
+      - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY:-}
+      # PostgreSQL
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-n8n}
@@ -100,9 +116,38 @@ services:
     networks:
       - mvp-network
 
-  # Статический файловый сервер для саммари (.md файлы)
-  # Саммари хранятся в /summaries/YYYY-MM-DD/LEAD-XXXX_*.md
-  # Доступны по: http://84.252.100.93:8181/YYYY-MM-DD/LEAD-XXXX_call_YYYY-MM-DD.md
+  # ============================================================
+  # whisper — faster-whisper HTTP сервер (self-hosted STT)
+  # Включить: STT_PROVIDER=whisper + docker compose up whisper
+  # Модель: WHISPER_MODEL=medium (medium/large-v3)
+  # GPU (если есть): раскомментировать deploy ниже
+  # ============================================================
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    restart: unless-stopped
+    profiles:
+      - whisper
+    environment:
+      - WHISPER__MODEL=${WHISPER_MODEL:-medium}
+      - WHISPER__LANGUAGE=ru
+      - WHISPER__BEAM_SIZE=5
+    volumes:
+      - whisper_models:/root/.cache/huggingface
+    # GPU-поддержка: раскомментировать если есть NVIDIA GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    networks:
+      - mvp-network
+
+  # ============================================================
+  # summaries-nginx — Static file server for .md summaries
+  # URL: http://84.252.100.93:8181/summaries/YYYY-MM-DD/LEAD-XXXX_*.md
+  # ============================================================
   summaries-nginx:
     image: nginx:alpine
     restart: unless-stopped
@@ -120,6 +165,8 @@ volumes:
   postgres_data:
     driver: local
   summaries_data:
+    driver: local
+  whisper_models:
     driver: local
 
 networks:
