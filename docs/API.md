@@ -1,14 +1,16 @@
 # API Contracts — External Services
 
 > Все API-контракты используемых внешних сервисов.  
-> Обновлено: 2026-02-26 — миграция на Dify.ai, per-client RAG, новые эндпоинты.
+> Обновлено: 2026-03-02 — LLM = Claude через z.ai (Anthropic API), STT = Whisper self-hosted, Dify per-client RAG.
 
 ---
 
-## 1. Яндекс SpeechKit (STT)
+## 1. Яндекс SpeechKit (STT) — ❗ ОТКЛЮЧЕН
+
+> ⚠️ **SpeechKit отключён с 2026-03-01**. Текущий STT = Whisper self-hosted (см. секцию 10).
 
 **Docs**: https://yandex.cloud/ru/docs/speechkit/stt/api/transcribation  
-**Используется через**: `transcribe` service (port 9001)  
+**Используется через**: `transcribe` service (STT_PROVIDER=speechkit)  
 **Режим**: синхронное распознавание по чанкам 25 сек
 
 ### Endpoint
@@ -38,69 +40,72 @@ YANDEX_API_KEY=AQVNxxxxxxxxxxxxxxxx
 
 ---
 
-## 2. GLM-4 (ZhipuAI)
+## 2. LLM — Claude 3.5 Haiku через z.ai (Anthropic API)
 
-**Endpoint**: `POST https://open.bigmodel.cn/api/paas/v4/chat/completions`  
-**Auth**: `Authorization: Bearer {GLM4_API_KEY}`  
-**OpenAI-compatible** API
+> ⚠️ **КРИТИЧНО**: Несмотря на имя переменных `GLM4_*` в `.env`, фактический API — это **Anthropic Messages API**.
+> Это **НЕ** OpenAI-compatible. Формат запросов/ответов отличается.
 
-> ⚠️ **КРИТИЧНО**: `glm-4.7-flash` — thinking-модель. Без `"thinking": {"type": "disabled"}`
-> ответ уйдёт в `reasoning_content`, а `content` будет пустым. (см. E043 в ERRORS.md)
+**Endpoint**: `POST https://api.z.ai/api/anthropic/v1/messages`  
+**Auth**: `x-api-key: {GLM4_API_KEY}` + `anthropic-version: 2023-06-01`  
+**НЕ** `Authorization: Bearer`!
 
 ### Request
 
-```json
-{
-  "model": "glm-4-flash",
-  "messages": [
-    { "role": "system", "content": "Системный промпт..." },
-    { "role": "user",   "content": "Транскрипт созвона..." }
-  ],
-  "temperature": 0.3,
-  "max_tokens": 2000,
-  "stream": false,
-  "thinking": { "type": "disabled" }
-}
+```bash
+curl -X POST https://api.z.ai/api/anthropic/v1/messages \
+  -H "x-api-key: 99918695e8de4146a3303043154f4c51.Op8sSKnavRz8PrIQ" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-haiku-20241022",
+    "max_tokens": 2000,
+    "messages": [
+      { "role": "user", "content": "Привет" }
+    ]
+  }'
 ```
 
 ### Response
 
 ```json
 {
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "## Резюме\n...",
-      "reasoning_content": ""
-    }
-  }],
-  "usage": { "prompt_tokens": 1234, "completion_tokens": 567 }
+  "id": "msg_xxx",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "Привет! Чем могу помочь?" }
+  ],
+  "model": "claude-3-5-haiku-20241022",
+  "usage": { "input_tokens": 10, "output_tokens": 20 }
 }
 ```
 
-### Извлечение ответа (защита от пустого content)
+### Извлечение ответа
 
-```javascript
-// В n8n Code node:
-const msg = $json.choices?.[0]?.message || {};
-const summary = (msg.content || msg.reasoning_content || 'Ошибка генерации').trim();
+```python
+# Python:
+text = response['content'][0]['text']
+
+# JavaScript (n8n Code node):
+const text = $json.content?.[0]?.text || 'Ошибка генерации';
 ```
-
-### Модели
-
-| Модель | Контекст | Цена | Статус |
-|--------|----------|------|--------|
-| `glm-4-flash` | 128K | **Бесплатно** | **Используется в WF03** |
-| `glm-4.7-flash` | 200K | **Бесплатно** | Используется в WF02, WF04 |
-| `glm-4.7-flashx` | 200K | $0.07/$0.40 | Платная опция |
 
 ### Переменные окружения
 
 ```
-GLM4_API_KEY=xxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxx
-GLM4_BASE_URL=https://open.bigmodel.cn/api/paas/v4
-GLM4_MODEL=glm-4.7-flash
+GLM4_API_KEY=99918695e8de4146a3303043154f4c51.Op8sSKnavRz8PrIQ
+GLM4_BASE_URL=https://api.z.ai/api/anthropic
+GLM4_MODEL=claude-3-5-haiku-20241022
 ```
+
+### Сравнение OpenAI vs Anthropic форматов
+
+| | OpenAI (старый хардкод WF03) | Anthropic (фактический) |
+|--|--------------------------------|---------------------------|
+| Endpoint | `/v4/chat/completions` | `/v1/messages` |
+| Auth header | `Authorization: Bearer xxx` | `x-api-key: xxx` |
+| Extra header | — | `anthropic-version: 2023-06-01` |
+| Response | `choices[0].message.content` | `content[0].text` |
 
 ---
 
@@ -244,10 +249,19 @@ curl -X POST "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qB
 
 ---
 
-## 5. transcribe service (internal)
+## 5. transcribe service (internal, Strategy Pattern)
 
 **URL (docker network)**: `http://transcribe:9001`  
-**URL (host)**: `http://localhost:9001`
+**URL (host)**: `http://localhost:9001`  
+**STT Provider**: задаётся через `STT_PROVIDER` в `.env`
+
+### Поддерживаемые провайдеры
+
+| Provider | .env | Стоимость | Примечание |
+|----------|------|-----------|------------|
+| Whisper | `STT_PROVIDER=whisper` | Бесплатно | Текущий, WHISPER_URL=http://whisper:8000 |
+| SpeechKit | `STT_PROVIDER=speechkit` | ~25K руб/мес | Отключён |
+| AssemblyAI | `STT_PROVIDER=assemblyai` | ~$0.006/мин | Не тестирован |
 
 ### Start transcription
 
@@ -273,9 +287,8 @@ POST http://transcribe:9001/check
 
 ```
 GET http://transcribe:9001/health
-→ { "status": "ok" }
+→ { "status": "ok", "provider": "whisper" }
 ```
-
 ---
 
 ## 6. PostgreSQL (внутренний)
@@ -395,40 +408,43 @@ WF03 должен записывать файлы в volume `summaries_data`:
 // Путь внутри контейнера: /summaries/YYYY-MM-DD/LEAD-XXX_call_YYYY-MM-DD.md
 ```
 
----
+## 10. Whisper API (self-hosted, faster-whisper-server)
 
-## 9. Healthchecks (smoke tests)
+**URL (docker network)**: `http://whisper:8000`  
+**ВАЖНО**: Порт **8000**, не 9000!
+
+### Transcribe
 
 ```bash
-# n8n
-curl -sf http://localhost:5678/healthz && echo "n8n OK"
-
-# PostgreSQL
-docker exec mvp-auto-summary-postgres-1 pg_isready -U n8n && echo "PG OK"
-
-# transcribe
-curl -sf http://localhost:9001/health && echo "transcribe OK"
-
-# Dify
-curl -sf http://localhost/v1/datasets?limit=1 \
-  -H "Authorization: Bearer dataset-k7rrBrS6TsEixGGIyAvywfb0" | grep -q '"data"' && echo "Dify OK"
-
-# summaries nginx
-curl -sf http://localhost:8181/health && echo "nginx OK"
-
-# Telegram Bot
-curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | python3 -c "
-import sys,json; d=json.load(sys.stdin)
-print('Telegram OK:', d['result']['username'])"
-
-# GLM-4
-curl -sf -X POST https://open.bigmodel.cn/api/paas/v4/chat/completions \
-  -H "Authorization: Bearer ${GLM4_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"glm-4.7-flash","messages":[{"role":"user","content":"1+1=?"}],"max_tokens":5,"thinking":{"type":"disabled"}}' \
-  | python3 -c "import sys,json; print('GLM4 OK:', json.load(sys.stdin)['choices'][0]['message']['content'])"
+curl -X POST http://whisper:8000/v1/audio/transcriptions \
+  -F "file=@audio.webm" \
+  -F "model=medium" \
+  -F "language=ru"
 ```
+
+### Response
+
+```json
+{
+  "text": "Транскрибированный текст..."
+}
+```
+
+### Переменные окружения
+
+```
+STT_PROVIDER=whisper
+WHISPER_URL=http://whisper:8000
+WHISPER_MODEL=medium
+```
+
+### Производительность (CPU, 10 cores Xeon Gold 6240R)
+
+| Аудио | Модель | Время | Результат |
+|-------|--------|-------|-----------|
+| 2:12 (русский) | medium | ~5 мин | 1574 символов |
+| тишина | medium | <1 мин | 0 символов (нет галлюцинаций) |
 
 ---
 
-*Обновлено: 2026-02-26 — Dify per-client KB, n8n API, summaries-nginx, актуальные dataset IDs*
+*Обновлено: 2026-03-02 — LLM = Claude/z.ai (Anthropic API), STT = Whisper medium self-hosted, transcribe с Strategy Pattern*

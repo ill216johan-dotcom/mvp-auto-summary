@@ -1,7 +1,7 @@
 # MVP Auto-Summary: Architecture & Specifications
 
-> **Version:** 1.0 | **Date:** 2026-02-18  
-> **Status:** Phase 0 — MVP  
+> **Version:** 1.1 | **Date:** 2026-02-18  
+> **Status:** E2E тест пройден. Whisper medium STT. Claude через z.ai.  
 > **Strategy:** Buy over Build — no custom backend
 
 ---
@@ -24,7 +24,7 @@ System for automatic meeting transcription and summarization at a fulfillment co
 ```
                     ┌──────────────────────────────────────────────────┐
                     │                VPS (Ubuntu 22.04)                │
-                    │                2 vCPU / 8 GB RAM                 │
+                    │            10 vCPU / 15 GB RAM               │
                     │                                                  │
                     │  ┌─────────────────────────────────────────────┐ │
                     │  │            docker-compose                   │ │
@@ -129,7 +129,7 @@ System for automatic meeting transcription and summarization at a fulfillment co
 
 **Docker**: `onerahmet/openai-whisper-asr-webservice:latest-cpu`  
 **Engine**: faster-whisper (CTranslate2 — в 4x быстрее оригинального Whisper)  
-**API**: `POST http://whisper:9000/asr?task=transcribe&language=ru&output=json`
+**API**: `POST http://whisper:8000/asr?task=transcribe&language=ru&output=json`
 
 **Модели и ресурсы:**
 
@@ -141,7 +141,7 @@ System for automatic meeting transcription and summarization at a fulfillment co
 | **medium** | **+3 GB** | **~40 мин** | **~5%** |
 | large-v3 | +5 GB | ~90 мин | ~3% |
 
-**Рекомендация**: модель `medium` — баланс качества и скорости. VPS нужен 8 GB RAM.
+**Рекомендация**: модель `medium` — баланс качества и скорости. VPS нужен 15 GB RAM (medium ~3.5GB + система).
 
 **Простой flow (без конвертации, без S3, без polling):**
 1. n8n отправляет WebM файл напрямую в Whisper
@@ -381,12 +381,11 @@ mvp-auto-summary/
 
 | Component | Cost | Notes |
 |-----------|------|-------|
-| VPS (2 vCPU, 8 GB RAM) | ~2,500 RUB | Ubuntu 22.04 |
-| Whisper (self-hosted) | **0 RUB** | Бесплатно, работает на VPS |
-| GLM-4.7-FlashX API | ~300 RUB | ~$0.005 per summary |
-| **TOTAL** | **~2,800 RUB/month** | |
-
-> **Экономия 90%** по сравнению с первоначальным планом (27,500 → 2,800 руб).
+| VPS (10 vCPU, 15 GB RAM) | ~4,000 RUB | Ubuntu, Xeon Gold 6240R |
+| Whisper medium (self-hosted) | **0 RUB** | Бесплатно, ~3.5GB RAM |
+| Claude 3.5 Haiku (z.ai) | ~500 RUB | ~$0.01 per summary |
+| **TOTAL** | **~4,500 RUB/month** | |
+> **Экономия 85%** по сравнению с первоначальным планом (27,500 → 4,500 руб).
 
 ---
 
@@ -852,28 +851,82 @@ volumes:
 
 ---
 
-*Document created: 2026-02-18 | Updated: 2026-02-20 (сессия 4) — ffmpeg fix, реальные данные, производительность Whisper*
+*Document created: 2026-02-18 | Updated: 2026-03-02 (сессия 5) — E2E тест, сервер 15GB/10CPU, Whisper medium, z.ai/Claude*
 
 ---
 
-## 17. Текущее состояние STT (2026-03-01)
+## 18. Текущее состояние системы (2026-03-02, после E2E теста)
 
-### ⏸️ Yandex SpeechKit отключён временно
+### Серверные ресурсы (обновлены 2026-03-01)
 
-Сервис `transcribe` (порт 9001) остановлен на паузу до оптимизации расходов. WF01 (New Recording) не будет работать пока STT не возобновлён.
+| Параметр | Было | Стало |
+|----------|------|-------|
+| RAM | 7.8 GB | **15 GB** |
+| CPU | ? | **10 cores (Xeon Gold 6240R)** |
+| OS | Ubuntu 22.04 | Ubuntu 22.04 |
+| IP | 84.252.100.93 | 84.252.100.93 |
 
-### Варианты замены STT
+### STT: Whisper self-hosted (medium)
 
-| Вариант | Стоимость | Качество RU | Плюсы | Минусы |
-|---------|---------|--------------|-------|--------|
-| **Yandex SpeechKit** | ~25K руб/мес | Отличное | Хорошо знает русский | Дорого |
-| **Whisper self-hosted** | 0 руб | Очень хорошо | Бесплатно | +3 GB RAM на VPS |
-| **OpenAI Whisper API** | ~$0.006/мин | Очень хорошо | Нет RAM-нагрузки | Платно |
-| **GLM-4 audio** | Бесплатно | Хорошо | Бесплатно | Не тестировался |
+- **Провайдер**: `STT_PROVIDER=whisper`
+- **URL**: `http://whisper:8000` (внутри Docker network)
+- **Модель**: `medium` (faster-whisper, ~3.5 GB RAM)
+- **Качество**: Отличное распознавание русского (1574 символов из 2:12 аудио)
+- **Скорость**: ~5 мин на 2:12 аудио (CPU-only)
+- **Особенность**: НЕ галлюцинирует на тишине (возвращает 0 символов)
+- **ВАЖНО**: `WHISPER_URL` должен быть `http://whisper:8000` (не 9000!)
 
-### Рекомендация (уточнить у руководства)
+### LLM: Claude 3.5 Haiku через z.ai
 
-Самый экономный и простой путь — запустить Whisper self-hosted (уже был настроен и работал, см. секции 3.3 и 15).  
-Докер `transcribe` в `docker-compose.yml` оставлен для обратной совместимости. См. `E100` в `docs/ERRORS.md`.
+- **КРИТИЧНО**: Несмотря на имя переменных `GLM4_*`, API = **Anthropic Messages API**
+- **Endpoint**: `POST https://api.z.ai/api/anthropic/v1/messages`
+- **Модель**: `claude-3-5-haiku-20241022`
+- **Авторизация**: `x-api-key` header + `anthropic-version: 2023-06-01`
+- **НЕ OpenAI формат**: не `/chat/completions`, не `Authorization: Bearer`
 
-*Обновлено: 2026-03-01*
+### RAG: Dify.ai
+
+- **UI**: `http://84.252.100.93` (порт 80)
+- **Chatbot**: `http://84.252.100.93/chat/71pymtobibxuwqbc` (app: «ФФ Ассистент Куратора»)
+- **App API key**: `app-UWjC7PoQEUMIPQB4ZlKRI1jh`
+- **Dataset API key**: `dataset-k7rrBrS6TsEixGGIyAvywfb0`
+- **Проблема**: Embedding-модель НЕ настроена → RAG на keyword-search → качество низкое
+- **Контейнер embeddings**: `text-embeddings-inference` на порту 8081 (работает, но Dify не подключён)
+
+### Архитектура STT: Strategy Pattern
+
+```
+transcribe_server.py
+    ├── STTAdapter (абстрактный)
+    │   ├── SpeechKitAdapter   → Yandex SpeechKit API
+    │   ├── WhisperAdapter     → self-hosted faster-whisper (порт 8000)
+    │   └── AssemblyAIAdapter  → AssemblyAI API
+    │
+    └── Выбор через .env: STT_PROVIDER=whisper|speechkit|assemblyai
+```
+
+Переключение провайдера: изменить `STT_PROVIDER` в `.env` → `docker compose up -d`.
+
+### E2E тест — результаты (2026-03-02)
+
+| Этап | Вход | Выход | Статус |
+|------|------|-------|--------|
+| WF01 | `4405_тестовый_2026-03-01.webm` (2:12) | 1574 символов транскрипт | ✅ |
+| WF03 | Транскрипт | 1521 символ Markdown summary + Dify doc | ✅ |
+| WF02 | Summary | Telegram message_id=350 | ✅ |
+| Dify RAG | Вопрос через chatbot | Ошибка индексации | ⚠️ |
+
+### Docker Compose — ключевое
+
+- `docker compose restart` **НЕ** перезагружает `.env` — нужно `docker compose up -d`
+- Все контейнеры имеют `restart: unless-stopped` — автостарт после reboot
+- Whisper medium стабилен при 15GB RAM (ранее OOM при 7.8GB)
+
+### Нерешённые проблемы
+
+1. **Dify embedding**: Настроить Model Provider в Dify UI для векторного поиска
+2. **WF03 API формат**: n8n хардкодит OpenAI формат, а LLM = Anthropic через z.ai
+3. **WF01 retry timeout**: Транскрипт готов, но WF01 помечает как error (race condition)
+4. **Большие файлы**: >30 мин аудио → timeout при транскрипции на CPU
+
+*Обновлено: 2026-03-02*

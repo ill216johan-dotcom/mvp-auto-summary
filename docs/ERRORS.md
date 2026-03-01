@@ -2311,4 +2311,142 @@ docker logs mvp-auto-summary-whisper-1 --tail=10
 
 ---
 
-*Обновлено: 2026-03-01 — E100 обновлён (тарификация SpeechKit), добавлены E101-E102 (STT_PROVIDER ошибки).*
+*Обновлено: 2026-03-02 — E100-E106: STT_PROVIDER ошибки, Whisper OOM, Dify indexing, WF01 race condition.*
+
+---
+
+### E103: Whisper medium OOM на 7.8 GB RAM
+
+**Дата**: 2026-03-01  
+**Symptom**: Контейнер Whisper падает при загрузке модели `medium`. Docker logs: `Killed` или `Out of memory`.  
+**Root Cause**: Модель Whisper medium требует ~3.5 GB RAM только для себя. При 7.8 GB общей RAM + Docker + Dify + PostgreSQL + n8n — не хватает памяти.  
+**Fix**: Увеличить RAM сервера до 15+ GB.  
+**Статус**: ✅ Исправлено — сервер обновлён до 15 GB RAM, 10 CPU cores.
+
+```bash
+# Проверить RAM:
+free -h
+# Ожидается: ~15 GB total
+
+# Проверить что Whisper medium загрузился:
+docker logs mvp-auto-summary-whisper-1 --tail=20
+# Ожидается: 'Loaded model medium' или 'Application startup complete'
+```
+
+---
+
+### E104: Dify индексация фейлит — `PluginInvokeError: 'openai_api_key'`
+
+**Дата**: 2026-03-02  
+**Symptom**: Документ успешно загружен в Dify (status 200, doc создан), но индексация падает:
+```
+PluginInvokeError: 'openai_api_key'
+```
+**Root Cause**: Dify не знает о локальном контейнере embeddings. Контейнер `text-embeddings-inference` работает на порту 8081, но Dify не подключён к нему.  
+**Fix**: Настроить в Dify Admin UI:
+1. `http://84.252.100.93` → войти как admin
+2. Settings → Model Provider
+3. Добавить OpenAI-compatible embedding model:
+   - API Base URL: `http://text-embeddings-inference:8081` (или `http://84.252.100.93:8081`)
+   - Model name: согласно настройке контейнера
+   - API key: можно любой (локальный сервер)
+4. После добавления — переиндексировать документы в каждом датасете
+
+**Следствие**: Без embedding-модели Dify chatbot не может отвечать на RAG-вопросы (keyword-search недостаточен).  
+**Статус**: ❌ Не исправлено — нужна ручная настройка через Dify UI.
+
+---
+
+### E105: WF01 помечает файл как `error` хотя транскрипт уже есть (race condition)
+
+**Дата**: 2026-03-02  
+**Symptom**: Файл успешно транскрибирован Whisper’ом (транскрипт есть в `processed_files`), но WF01 помечает файл как `error`.  
+**Root Cause**: WF01 использует retry loop (10 попыток × 60 сек = 10 мин). Whisper medium на CPU может обрабатывать дольше 10 мин для длинных файлов. После исчерпания попыток WF01 помечает как error, хотя Whisper ещё работает и позже запишет результат в БД.
+
+**Диагностика**:
+```bash
+# Проверить что транскрипт есть, но статус = error:
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \
+  "SELECT filename, status, LENGTH(transcript_text) as chars FROM processed_files WHERE status='error' AND transcript_text IS NOT NULL;"
+```
+
+**Fix**: Увеличить количество попыток в WF01 или timeout между попытками. Либо добавить проверку статуса в transcribe сервисе.  
+**Статус**: ❌ Не исправлено
+
+---
+
+### E106: Большие аудиофайлы (>30 мин) — timeout при транскрипции Whisper
+
+**Дата**: 2026-03-02  
+**Symptom**: Файл `1000023` (~30 мин аудио) не успевает транскрибироваться в пределах WF01 retry window.  
+**Root Cause**: Whisper medium на CPU работает ~2.5x от реального времени. 30 мин аудио = ~75 мин обработки = превышает любой разумный timeout.
+
+**Варианты решения**:
+1. **Разбиение аудио на чанки**: ffmpeg split по 10-15 мин → обработка каждого отдельно
+2. **GPU-ускорение**: Перенос на сервер с GPU (ускорение 10-50x)
+3. **Увеличение timeout**: maxAttempts=30, waitSeconds=120 (60 мин ожидания)
+4. **Ручная обработка**: Большие файлы обрабатывать отдельным скриптом
+
+**Статус**: ❌ Не исправлено — требует архитектурного решения
+
+---
+
+### E107: WHISPER_URL — порт 8000, не 9000
+
+**Дата**: 2026-03-01  
+**Symptom**: transcribe сервис не может подключиться к Whisper: `Connection refused http://whisper:9000`  
+**Root Cause**: `faster-whisper-server` слушает на порту 8000 внутри контейнера, не 9000. В старом `docker-compose.yml` был порт 9000 от другого образа (onerahmet).  
+**Fix**: В `.env` указать правильный URL:
+```bash
+WHISPER_URL=http://whisper:8000   # НЕ 9000!
+```
+**ВАЖНО**: После изменения `.env` нужно `docker compose up -d`, не `docker compose restart` (см. E108).  
+**Статус**: ✅ Исправлено
+
+---
+
+### E108: `docker compose restart` НЕ перезагружает `.env`
+
+**Дата**: 2026-03-01  
+**Symptom**: Изменил `.env` (например `WHISPER_URL`), сделал `docker compose restart transcribe` — но контейнер использует старые значения.  
+**Root Cause**: `docker compose restart` перезапускает контейнер с теми же параметрами, с которыми он был создан. `.env` читается только при **создании** контейнера.
+
+**НЕПРАВИЛЬНО**:
+```bash
+docker compose restart transcribe   # .env НЕ перечитывается!
+```
+
+**ПРАВИЛЬНО**:
+```bash
+docker compose up -d                # Пересоздаёт контейнеры с новыми параметрами
+# или конкретный сервис:
+docker compose up -d transcribe
+```
+**Статус**: ✅ Задокументировано
+
+---
+
+### E109: LLM API — GLM4_* переменные на самом деле Anthropic API
+
+**Дата**: 2026-03-02  
+**Symptom**: WF03 в n8n отправляет запрос на `https://open.bigmodel.cn/api/paas/v4/chat/completions` (OpenAI формат) — но в `.env` LLM = Claude через z.ai (Anthropic формат).  
+**Root Cause**: Переменные с именем `GLM4_*` на самом деле указывают на Anthropic API:
+```bash
+GLM4_BASE_URL=https://api.z.ai/api/anthropic   # Anthropic, НЕ OpenAI!
+GLM4_MODEL=claude-3-5-haiku-20241022            # Claude, НЕ GLM!
+```
+
+**Несоответствие форматов**:
+
+| | OpenAI (WF03 хардкод) | Anthropic (фактический API) |
+|--|--------------------------|-------------------------------|
+| Endpoint | `/v4/chat/completions` | `/v1/messages` |
+| Auth | `Authorization: Bearer` | `x-api-key` header |
+| Body | `messages: [{role, content}]` | `messages: [{role, content}]` + `anthropic-version` |
+| Response | `choices[0].message.content` | `content[0].text` |
+
+**Fix**: Обновить HTTP Request ноду в WF03 через n8n UI:  
+- URL: `https://api.z.ai/api/anthropic/v1/messages`
+- Header: `x-api-key: {GLM4_API_KEY}`, `anthropic-version: 2023-06-01`
+- Body: Anthropic Messages API формат  
+**Статус**: ❌ Не исправлено — нужна ручная правка в n8n UI
