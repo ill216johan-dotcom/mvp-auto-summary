@@ -34,27 +34,47 @@
 ### 1. ✅ WF03 Write .md (СДЕЛАНО 2026-03-01)
 - Добавлены ноды `Prep Call/Chat MD Write` + `Write Call/Chat MD File` (Execute Command)
 - n8n теперь записывает .md файлы в `/summaries/YYYY-MM-DD/LEAD-XXXX_*.md`
-- Импортировать обновлённый: `n8n-workflows/03-individual-summaries.json`
+- Файл WF03 обновлён, задеплоен, активен (29 нод)
 
-### 2. ❓ Создать Dify Chatbot (UI)
+### 2. ✅ WF06 активирован (СДЕЛАНО 2026-03-01)
+- Дедлайны + задачи из звонков → PostgreSQL `extracted_tasks` → Telegram алерты (22:30)
+
+### 3. ✅ Тестовые данные очищены (СДЕЛАНО 2026-03-01)
+- Удалены тестовые записи: `processed_files`, `chat_messages` (TEST_4405)
+- Удалён тестовый .md файл из summaries volume
+
+### 4. ✅ Дубликаты WF04 удалены (СДЕЛАНО 2026-03-01)
+- Было 6 копий неактивного WF04 — все удалены
+- Осталось: 1 активный WF04 (id: `39wv0ASq5MXGnAEn`)
+
+### 5. ❓ Создать Dify Chatbot (UI)
 - DSL-файл готов: `dify-chatbot-app.json` (в корне проекта)
+- Chatbot URL уже есть в .env: `DIFY_CHATBOT_URL=http://84.252.100.93/chat/71pymtobibxuwqbc`
+- Проверить что все 7 KB подключены к chatbot в Dify Studio
 - **Инструкция:** `docs/GUIDE.md` — раздел «🤖 Dify Chatbot»
-- После создания: записать URL в `.env` → `DIFY_CHATBOT_URL`
 
-### 3. ❓ Тест WF03 end-to-end
-- Инструкция: `docs/GUIDE.md` — раздел «🧪 WF03 End-to-End тест»
-
-### 4. ❓ Загрузить оферту в общий датасет
+### 6. ❓ Загрузить оферту в общий датасет
 - Dify → Knowledge → «Общая документация ФФ Платформы» → Add document → PDF/TXT
+- Датасет сейчас пустой (docs=0)
 
-### 5. ⏸️ STT — восстановить транскрипцию
+### 7. ⏸️ STT — восстановить транскрипцию
 - Yandex SpeechKit отключён (2026-03-01, оптимизация расходов)
+- WF01 активен, но transcribe-контейнер не обрабатывает файлы
 - См. E100 в `docs/ERRORS.md` и раздел 17 в `docs/SPECS.md` — варианты замены
 - Рекомендация: Whisper self-hosted (`docs/GUIDE.md` — «🔌 Восстановить STT»)
 
-### 6. ❓ Активировать WF06 (дедлайны)
-- После стабилизации основного потока
-- Инструкция: `docs/GUIDE.md` — раздел «📦 WF06 Дедлайны»
+---
+
+## АКТИВНЫЕ WORKFLOW (на 2026-03-01)
+
+| ID | Название | Расписание | Статус |
+|----|----------|------------|--------|
+| `mEgnRihTrXgdS6mG` | 00 — Error Alerts | on error | ✅ |
+| `EFQwS2Iy76c9J8Dq` | 01 — New Recording → SpeechKit | on file | ✅ (STT off) |
+| `cBfns8usSm2DYxQg` | 02 — Daily Digest → Telegram | 21:00 | ✅ |
+| `FGMFUfL3lGI8B2Yt` | 03 — Individual Summaries → Dify | 22:00 | ✅ |
+| `39wv0ASq5MXGnAEn` | 04 — Telegram Bot Commands | webhook | ✅ |
+| `nmuKqgUDP6FP0h1s` | 06 — Deadline Extractor | 22:30 | ✅ |
 
 ---
 
@@ -63,11 +83,10 @@
 | Проблема | Причина | Статус |
 |----------|---------|--------|
 | Dify без embedding | Модель векторизации не настроена | Работает на keyword-search |
-| WF03 .md файлы | Не было Write File ноды | ✅ ИСПРАВЛЕНО (2026-03-01) |
-| WF04 дублировался | Старый импорт не был удалён | Исправляется |
 | Yandex SpeechKit | Временно отключён | ⏸️ См. E100 в ERRORS.md |
-| Dify Chatbot | Ещё не создан | ❓ См. GUIDE.md |
+| Dify Chatbot KB | Не проверено подключение всех 7 KB | ❓ |
+| «Общая документация» | Датасет пустой (docs=0) | ❓ Загрузить оферту |
 
 ---
 
-*Обновлено: 2026-03-01 — добавлен WF03 Write .md, DSL чатбота, зафиксировано отключение SpeechKit.*
+*Обновлено: 2026-03-01 — WF03+WF06 активны, дубли WF04 удалены, тестовые данные очищены.*
