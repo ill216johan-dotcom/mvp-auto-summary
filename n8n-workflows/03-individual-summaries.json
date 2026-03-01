@@ -298,17 +298,63 @@
 
     {
       "parameters": {
+        "jsCode": "// Prepare shell command to write .md file to nginx summaries volume\nconst { lead_id, summary, date, filename } = $json;\nconst safeContent = summary.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"'\\\\\\''\");\nconst dir = `/summaries/${date}`;\nconst filePath = `${dir}/${filename}`;\nreturn [{ json: { ...$json, write_cmd: `mkdir -p '${dir}' && printf '%s' '${safeContent}' > '${filePath}'`, filePath } }];"
+      },
+      "id": "prep-call-md",
+      "name": "Prep Call MD Write",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2620, 0]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Prepare shell command to write .md file to nginx summaries volume\nconst { lead_id, summary, date, filename } = $json;\nconst safeContent = summary.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"'\\\\\\''\");\nconst dir = `/summaries/${date}`;\nconst filePath = `${dir}/${filename}`;\nreturn [{ json: { ...$json, write_cmd: `mkdir -p '${dir}' && printf '%s' '${safeContent}' > '${filePath}'`, filePath } }];"
+      },
+      "id": "prep-chat-md",
+      "name": "Prep Chat MD Write",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2620, 400]
+    },
+
+    {
+      "parameters": {
+        "command": "={{ $json.write_cmd }}"
+      },
+      "id": "write-call-md",
+      "name": "Write Call MD File",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2840, 0],
+      "continueOnFail": true
+    },
+
+    {
+      "parameters": {
+        "command": "={{ $json.write_cmd }}"
+      },
+      "id": "write-chat-md",
+      "name": "Write Chat MD File",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2840, 400],
+      "continueOnFail": true
+    },
+
+    {
+      "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO client_summaries (lead_id, source_type, summary_text, summary_date) VALUES ($1, $2, $3, $4::date) RETURNING id",
         "options": {
-          "queryReplacement": "={{ $json.lead_id }}||={{ $json.source_type }}||={{ $json.summary }}||={{ $json.date }}"
+          "queryReplacement": "={{ $('Prep Call DB Save').first().json.lead_id }}||={{ $('Prep Call DB Save').first().json.source_type }}||={{ $('Prep Call DB Save').first().json.summary }}||={{ $('Prep Call DB Save').first().json.date }}"
         }
       },
       "id": "save-call-summary",
       "name": "Save Call Summary",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2620, 0],
+      "position": [3060, 0],
       "continueOnFail": true,
       "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
@@ -318,14 +364,14 @@
         "operation": "executeQuery",
         "query": "INSERT INTO client_summaries (lead_id, source_type, summary_text, summary_date) VALUES ($1, $2, $3, $4::date) RETURNING id",
         "options": {
-          "queryReplacement": "={{ $json.lead_id }}||={{ $json.source_type }}||={{ $json.summary }}||={{ $json.date }}"
+          "queryReplacement": "={{ $('Prep Chat DB Save').first().json.lead_id }}||={{ $('Prep Chat DB Save').first().json.source_type }}||={{ $('Prep Chat DB Save').first().json.summary }}||={{ $('Prep Chat DB Save').first().json.date }}"
         }
       },
       "id": "save-chat-summary",
       "name": "Save Chat Summary",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2620, 400],
+      "position": [3060, 400],
       "continueOnFail": true,
       "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
@@ -342,7 +388,7 @@
       "name": "Update Processed Files",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2840, 0],
+      "position": [3280, 0],
       "continueOnFail": true,
       "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     },
@@ -359,7 +405,7 @@
       "name": "Mark Chat Messages Sent",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2840, 400],
+      "position": [3280, 400],
       "continueOnFail": true,
       "credentials": { "postgres": { "id": "F3beGLVPdqgBpqlv", "name": "PostgreSQL" } }
     }
@@ -389,8 +435,12 @@
     "Resolve Chat Dataset": { "main": [[{ "node": "Push Chat to Dify", "type": "main", "index": 0 }]] },
     "Push Call to Dify": { "main": [[{ "node": "Prep Call DB Save", "type": "main", "index": 0 }]] },
     "Push Chat to Dify": { "main": [[{ "node": "Prep Chat DB Save", "type": "main", "index": 0 }]] },
-    "Prep Call DB Save": { "main": [[{ "node": "Save Call Summary", "type": "main", "index": 0 }]] },
-    "Prep Chat DB Save": { "main": [[{ "node": "Save Chat Summary", "type": "main", "index": 0 }]] },
+    "Prep Call DB Save": { "main": [[{ "node": "Prep Call MD Write", "type": "main", "index": 0 }]] },
+    "Prep Chat DB Save": { "main": [[{ "node": "Prep Chat MD Write", "type": "main", "index": 0 }]] },
+    "Prep Call MD Write": { "main": [[{ "node": "Write Call MD File", "type": "main", "index": 0 }]] },
+    "Prep Chat MD Write": { "main": [[{ "node": "Write Chat MD File", "type": "main", "index": 0 }]] },
+    "Write Call MD File": { "main": [[{ "node": "Save Call Summary", "type": "main", "index": 0 }]] },
+    "Write Chat MD File": { "main": [[{ "node": "Save Chat Summary", "type": "main", "index": 0 }]] },
     "Save Call Summary": { "main": [[{ "node": "Update Processed Files", "type": "main", "index": 0 }]] },
     "Save Chat Summary": { "main": [[{ "node": "Mark Chat Messages Sent", "type": "main", "index": 0 }]] }
   },

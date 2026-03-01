@@ -272,3 +272,93 @@ psql -U n8n -d n8n -c "SELECT COUNT(*) FROM processed_files;"
 
 *Документ создан: 2026-02-23*
 *Версия системы: 3.0*
+
+---
+
+## 🤖 Dify Chatbot — настройка «ФФ Ассистент Куратора»
+
+*Добавлено: 2026-03-01*
+
+### Способ A: Импорт через DSL (рекомендуется)
+
+1. Открыть Dify: `http://84.252.100.93:8080`
+2. **Studio** → кнопка **« Create from DSL file»** (или **Import**)
+3. Загрузить файл **`dify-chatbot-app.json`** из корня проекта
+4. Нажать **Import**
+5. Открыть созданное приложение → вкладка **Knowledge** → добавить ВСЕ 7 датасетов:
+   - `Общая документация ФФ Платформы`
+   - `LEAD-4405 ФФ-4405`, `LEAD-987 ФФ-987`, `LEAD-1381 ФФ-1381`
+   - `LEAD-2048 ФФ-2048`, `LEAD-4550 ФФ-4550`, `LEAD-506 ФФ-506`
+6. Нажать **Publish**
+7. Скопировать URL чата (` http://84.252.100.93:8080/chat/XXX`)
+8. Записать в `.env`: `DIFY_CHATBOT_URL=http://84.252.100.93:8080/chat/XXX`
+
+### Способ B: Через API
+
+```bash
+# На сервере:
+cd /opt/mvp-autosummary
+python3 scripts/setup_dify_chatbot.py --create --api-key YOUR_DIFY_API_KEY
+```
+
+> После создания через API — подключи KB вручную через UI (шаг 5 из Способа A).
+
+---
+
+## 🧪 WF03 End-to-End тест
+
+### Подготовка тестовых данных
+
+```sql
+-- Подключиться к БД:
+docker exec -it mvp-autosummary-postgres-1 psql -U n8n -d n8n
+
+-- Вставить тестовый транскрипт
+INSERT INTO processed_files (filename, lead_id, status, transcript_text, file_date)
+VALUES (
+  'TEST_4405_' || CURRENT_DATE || '.ogg',
+  '4405',
+  'completed',
+  'Тестовый транскрипт. Клиент ФФ-4405 обсудил сроки поставки. Договорились о доставке до 15 марта.',
+  CURRENT_DATE
+);
+
+-- Вставить тестовое чат-сообщение
+INSERT INTO chat_messages (lead_id, chat_title, sender, message_text, message_date, summary_sent)
+VALUES ('4405', 'Тест ФФ-4405', 'Менеджер', 'Когда будет готов заказ?', NOW(), false);
+```
+
+### Запуск и проверка
+
+1. n8n UI → **WF03 — Individual Summaries** → **Execute Workflow**
+2. Проверить:
+   - ✅ Dify KB `LEAD-4405` → появился новый документ
+   - ✅ Файл `.md` появился в `/summaries/YYYY-MM-DD/`
+   - ✅ `http://84.252.100.93:8181/summaries/YYYY-MM-DD/LEAD-4405_call_YYYY-MM-DD.md` открывается
+   - ✅ Запись в `client_summaries`
+
+### Очистка после теста
+
+```sql
+DELETE FROM processed_files WHERE filename LIKE 'TEST%';
+DELETE FROM chat_messages WHERE chat_title = 'Тест ФФ-4405';
+DELETE FROM client_summaries WHERE summary_date = CURRENT_DATE AND lead_id = '4405';
+```
+
+---
+
+## 📦 WF06 Дедлайны — активация
+
+**WF06** извлекает задачи и дедлайны из транскриптов через GLM-4 и сохраняет в `extracted_tasks`.
+
+1. Применить миграцию БД (1 раз):
+```bash
+docker exec mvp-autosummary-postgres-1 \
+  psql -U n8n -d n8n -f /scripts/migrate_db_v2.sql
+```
+2. n8n UI → **WF06 — Deadline Extractor** → включить **Active** toggle
+3. WF06 запускается ежедневно в 22:30
+
+---
+
+*Обновлено: 2026-03-01 — добавлены разделы Dify Chatbot, WF03 тест, WF06 активация*
