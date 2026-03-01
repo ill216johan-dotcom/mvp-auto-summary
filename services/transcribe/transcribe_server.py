@@ -95,7 +95,7 @@ def db_update(filename, status, transcript=None):
 def convert_to_ogg_chunks(filepath, tmpdir, chunk_sec=25):
     """Converts audio to OGG Opus and splits into chunks."""
     ogg = tmpdir + '/a.ogg'
-        subprocess.run(['ffmpeg','-i',filepath,'-vn','-acodec','libopus','-b:a','16k','-ac','1','-ar','16000',ogg,'-y'], capture_output=True, timeout=300)
+    subprocess.run(['ffmpeg', '-i', filepath, '-vn', '-acodec', 'libopus', '-b:a', '16k', '-ac', '1', '-ar', '16000', ogg, '-y'], capture_output=True, timeout=300)
     subprocess.run(
         ['ffmpeg', '-i', ogg, '-f', 'segment',
          '-segment_time', str(chunk_sec), '-c', 'copy',
@@ -247,9 +247,9 @@ def transcribe_async(filepath, filename):
     try:
         provider_fn = PROVIDERS.get(STT_PROVIDER)
         if not provider_fn:
+            allowed = ', '.join(PROVIDERS.keys())
             raise RuntimeError(
-                f'Unknown STT_PROVIDER={STT_PROVIDER!r}. '
-                f'Allowed: {', '.join(PROVIDERS)}'
+                f'Unknown STT_PROVIDER={STT_PROVIDER!r}. Allowed: {allowed}'
             )
         result = provider_fn(filepath, filename)
         db_update(filename, 'completed', result)
