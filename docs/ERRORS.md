@@ -2634,3 +2634,37 @@ GLM4_MODEL=claude-3-5-haiku-20241022            # Claude, НЕ GLM!
 - Header: `x-api-key: {GLM4_API_KEY}`, `anthropic-version: 2023-06-01`
 - Body: Anthropic Messages API формат  
 **Статус**: ❌ Не исправлено — нужна ручная правка в n8n UI
+
+---
+
+### E108: Dify — бесконечная загрузка после миграции на новый домен
+
+**Symptom**: `https://dify-ff.duckdns.org` открывается, но UI бесконечно крутит спиннер.
+
+**Root Cause**: В `.env` Dify остались старые URL:
+```
+CONSOLE_API_URL=http://84.252.100.93
+CONSOLE_WEB_URL=http://84.252.100.93
+```
+Dify фронтенд генерирует API-запросы на основе этих переменных. Браузер обращается к `http://84.252.100.93` (старый адрес) → порт 80 больше не обслуживает Dify → запросы зависают → бесконечная загрузка.
+
+**Fix**:
+```bash
+cd /root/dify/docker
+
+# Обновить все URL на новый домен:
+sed -i 's|CONSOLE_API_URL=.*|CONSOLE_API_URL=https://dify-ff.duckdns.org|' .env
+sed -i 's|CONSOLE_WEB_URL=.*|CONSOLE_WEB_URL=https://dify-ff.duckdns.org|' .env
+sed -i 's|^APP_WEB_URL=.*|APP_WEB_URL=https://dify-ff.duckdns.org|' .env
+sed -i 's|^SERVICE_API_URL=.*|SERVICE_API_URL=https://dify-ff.duckdns.org|' .env
+sed -i 's|^FILES_URL=.*|FILES_URL=https://dify-ff.duckdns.org|' .env
+
+# Пересоздать все контейнеры:
+docker compose up -d --force-recreate
+```
+
+**Важно**: Нужно обновить ВСЕ пять URL-переменных, иначе часть функций будет ломаться.
+
+---
+
+*Обновлено: 2026-03-02 — E108: бесконечная загрузка Dify после миграции*
