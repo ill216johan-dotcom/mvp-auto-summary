@@ -523,7 +523,7 @@ docker compose ps
 # jitsi-meet-jicofo-1   → Up
 # jitsi-meet-jvb-1      → Up
 # jitsi-meet-prosody-1  → Up
-# jitsi-meet-web-1      → Up (port 8443)
+# jitsi-meet-web-1      → Up (внутренний порт 8443)
 
 # Проверить что Jibri готов к записи:
 docker exec jitsi-meet-jibri-1 curl -s http://localhost:2222/jibri/api/v1.0/health
@@ -535,8 +535,110 @@ docker exec jitsi-meet-jibri-1 curl -s http://localhost:2222/jibri/api/v1.0/heal
 - WF01 подхватил через ~5 минут → статус `transcribing` → `completed`
 - End-to-end пайплайн работает
 
+### HTTPS через nginx reverse proxy (добавлено 02.03.2026)
+
+**Важно**: WebRTC не работает по HTTP! Браузеры блокируют доступ к камере/микрофону на незащищённых соединениях.
+
+**Архитектура:**
+```
+Internet → host nginx (:443) → internal services
+            ↓
+    ff-meet.duckdns.org → 127.0.0.1:8443 (Jitsi)
+    dify-ff.duckdns.org → 127.0.0.1:9002 (Dify)
+```
+
+**SSL сертификаты** (Let's Encrypt через acme.sh):
+```bash
+# Установка acme.sh
+apt install -y cron socat
+curl -sL https://get.acme.sh | sh -s email=your@email.com
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+
+# Получить сертификат
+~/.acme.sh/acme.sh --issue -d ff-meet.duckdns.org --standalone
+
+# Установить для nginx
+~/.acme.sh/acme.sh --install-cert -d ff-meet.duckdns.org --ecc \
+  --key-file /etc/nginx/ssl/ff-meet.key \
+  --fullchain-file /etc/nginx/ssl/ff-meet.crt
+```
+
+**Nginx конфигурация** (`/etc/nginx/sites-available/ff-meet.conf`):
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name ff-meet.duckdns.org;
+    
+    ssl_certificate /etc/nginx/ssl/ff-meet.crt;
+    ssl_certificate_key /etc/nginx/ssl/ff-meet.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+**Продление сертификатов** (автоматически через cron):
+```bash
+~/.acme.sh/acme.sh --renew -d ff-meet.duckdns.org --ecc --reloadcmd "systemctl reload nginx"
+```
+
+### Рабочие ссылки
+
+| Сервис | URL | Для кого |
+|--------|-----|----------|
+| Jitsi Meet | `https://ff-meet.duckdns.org/LEAD-{ID}-conf` | Клиенты |
+| Dify | `https://dify-ff.duckdns.org` | Работники |
+
+### Миграция на постоянный домен
+
+DuckDNS — временное решение для тестов. Для продакшена:
+
+1. **Купить домен** (например `meet.ff-platform.ru` — ~200-300₽/год на reg.ru)
+2. **Создать DNS A-запись**: `meet.ff-platform.ru → 84.252.100.93`
+3. **Получить SSL сертификат**:
+   ```bash
+   ~/.acme.sh/acme.sh --issue -d meet.ff-platform.ru --standalone
+   ~/.acme.sh/acme.sh --install-cert -d meet.ff-platform.ru \
+     --key-file /etc/nginx/ssl/meet.ff-platform.key \
+     --fullchain-file /etc/nginx/ssl/meet.ff-platform.crt
+   ```
+4. **Обновить nginx конфиг** (заменить `ff-meet.duckdns.org` на новый домен)
+5. **Обновить Jitsi PUBLIC_URL**:
+   ```bash
+   sed -i 's|PUBLIC_URL=.*|PUBLIC_URL=https://meet.ff-platform.ru|' /opt/jitsi-meet/.env
+   cd /opt/jitsi-meet && docker compose up -d --force-recreate web
+   ```
+6. **Перезапустить nginx**: `systemctl reload nginx`
+
+### Если есть существующий Jitsi-сервер
+
+Если у организации уже есть Jitsi (например `global-meet.ff-platform.ru`):
+
+**Вариант А: Перенести только Jibri на существующий сервер**
+- Плюсы: Меньше нагрузки на текущий сервер
+- Минусы: Нужно настраивать NFS для `/recordings`
+- Порядок: Установить Jibri на существующий сервер → настроить finalize.sh → смонтировать NFS
+
+**Вариант Б: Использовать существующий домен для текущего сервера**
+- Плюсы: Быстро, не нужно настраивать NFS
+- Минусы: Текущий сервер может не хватать ресурсов для продакшена
+- Порядок: См. инструкцию выше (миграция на постоянный домен)
+
+**Вариант В: Текущий сервер как staging, продакшен на существующем**
+- Плюсы: Безопасное тестирование
+- Минусы: Два сервера, два домена
+- Порядок: Оставить текущий как есть, интегрировать Jibri с продакшен-сервером позже
+
 ---
 
 *Создано: 02.03.2026*
-*Обновлено: 02.03.2026 — Docker-установка завершена, end-to-end тест пройден*
-*Актуально для: Ubuntu 22.04, docker-jitsi-meet (unstable), Jibri (unstable)*
+*Обновлено: 02.03.2026 — Добавлен HTTPS через nginx reverse proxy, DuckDNS домены, инструкция миграции*
+*Актуально для: Ubuntu 22.04, docker-jitsi-meet (unstable), Jibri (unstable), nginx 1.18, acme.sh*

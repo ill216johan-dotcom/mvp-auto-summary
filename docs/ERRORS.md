@@ -2284,6 +2284,190 @@ docker compose up -d --build transcribe
 
 ---
 
+## Ошибки Jitsi + Jibri + HTTPS (2026-03-02)
+
+### E101: Jitsi — WebRTC не работает по HTTP (redirect на webrtcUnsupported.html)
+
+**Symptom**: При открытии `http://84.252.100.93:8443/LEAD-123-conf` браузер перенаправляет на `/static/webrtcUnsupported.html` с сообщением "WebRTC is not available in your browser"
+
+**Root Cause**: Современные браузеры **запрещают WebRTC по HTTP** с публичных IP. Доступ к камере/микрофону разрешён только по HTTPS (или localhost).
+
+**НЕПРАВИЛЬНО**:
+```
+http://84.252.100.93:8443/LEAD-123-conf  ← WebRTC заблокирован
+```
+
+**ПРАВИЛЬНО**:
+```
+https://ff-meet.duckdns.org/LEAD-123-conf  ← Работает
+```
+
+**Fix**: Настроить nginx reverse proxy с валидным SSL-сертификатом (см. E103).
+
+---
+
+### E102: JVB — JVB_ADVERTISE_IPS не задан → ICE failed
+
+**Symptom**: Jitsi открывается, но видео/аудио не работает. В логах JVB нет публичного IP.
+
+**Root Cause**: `JVB_ADVERTISE_IPS` закомментирован в `.env` → JVB анонсирует только внутренний Docker IP (172.x.x.x) → клиенты не могут подключиться по ICE.
+
+**Fix**:
+```bash
+# В /opt/jitsi-meet/.env раскомментировать и задать публичный IP:
+sed -i 's|#JVB_ADVERTISE_IPS=.*|JVB_ADVERTISE_IPS=84.252.100.93|' /opt/jitsi-meet/.env
+
+# Перезапустить JVB:
+cd /opt/jitsi-meet && docker compose up -d --force-recreate jvb
+```
+
+**Проверка**:
+```bash
+docker logs jitsi-meet-jvb-1 2>&1 | grep "public address"
+# Должно быть: Discovered public address 84.252.100.93:...
+```
+
+---
+
+### E103: certbot сломан — ImportError из-за urllib3/appengine
+
+**Symptom**:
+```
+ImportError: cannot import name 'appengine' from 'urllib3.contrib'
+```
+
+**Root Cause**: Конфликт версий `requests-toolbelt` и `urllib3` на Ubuntu 22.04. Certbot из apt не работает.
+
+**Fix**: Использовать `acme.sh` вместо certbot:
+```bash
+apt install -y cron socat
+curl -sL https://get.acme.sh | sh -s email=your@email.com
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+~/.acme.sh/acme.sh --issue -d your-domain.duckdns.org --standalone
+```
+
+**Установка сертификата для nginx**:
+```bash
+~/.acme.sh/acme.sh --install-cert -d your-domain.duckdns.org --ecc \
+  --key-file /etc/nginx/ssl/your-domain.key \
+  --fullchain-file /etc/nginx/ssl/your-domain.crt
+```
+
+---
+
+### E104: Dify nginx занимает порт 443 — host nginx не может стартовать
+
+**Symptom**:
+```
+nginx: [emerg] bind() to 0.0.0.0:443 failed (98: Unknown error)
+```
+
+**Root Cause**: Dify docker-compose мапит порт 443 контейнера на хост:
+```yaml
+ports:
+  - "${EXPOSE_NGINX_SSL_PORT:-443}:${NGINX_SSL_PORT:-443}"
+```
+
+**Fix**: Отключить маппинг порта 443 для Dify, оставить только внутренний порт:
+```bash
+cd /root/dify/docker
+echo 'EXPOSE_NGINX_SSL_PORT=9003' >> .env
+docker compose up -d nginx
+```
+
+После этого host-nginx сможет занять порт 443 для reverse proxy.
+
+---
+
+### E105: DuckDNS — бесплатный домен для тестирования HTTPS
+
+**Зачем**: Let's Encrypt не выдаёт сертификат для IP-адресов, нужен домен.
+
+**Инструкция**:
+1. Зайти на https://www.duckdns.org
+2. Войти через Google/GitHub/Twitter
+3. Создать поддомен (например `ff-meet`)
+4. Указать IP: `84.252.100.93`
+5. Домен готов: `ff-meet.duckdns.org`
+
+**Текущие домены**:
+- Jitsi: `https://ff-meet.duckdns.org`
+- Dify: `https://dify-ff.duckdns.org`
+
+**Ограничения DuckDNS**:
+- Поддомен, не полноценный домен
+- Некрасивое имя (можно использовать как тестовый, потом мигрировать)
+- Требует обновления IP каждые 6 месяцев (автоматически через скрипт)
+
+---
+
+### E106: nginx reverse proxy — конфигурация для Jitsi и Dify
+
+**Архитектура**:
+```
+Internet → host nginx (:443) → internal services
+            ↓
+    ff-meet.duckdns.org → 127.0.0.1:8443 (Jitsi)
+    dify-ff.duckdns.org → 127.0.0.1:9002 (Dify)
+```
+
+**Конфиг Jitsi** (`/etc/nginx/sites-available/ff-meet.conf`):
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name ff-meet.duckdns.org;
+    
+    ssl_certificate /etc/nginx/ssl/ff-meet.crt;
+    ssl_certificate_key /etc/nginx/ssl/ff-meet.key;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+**Применение**:
+```bash
+ln -sf /etc/nginx/sites-available/ff-meet.conf /etc/nginx/sites-enabled/
+nginx -t && systemctl start nginx
+```
+
+---
+
+### E107: Dify — после смены порта сломались относительные ссылки
+
+**Symptom**: После переезда Dify на `https://dify-ff.duckdns.org` некоторые ссылки ведут на старый адрес или не работают.
+
+**Root Cause**: Dify кеширует старый базовый URL. Нужно обновить в .env Dify.
+
+**Fix**:
+```bash
+cd /root/dify/docker
+grep -E 'APP_WEB_URL|CONSOLE_API_URL|CONSOLE_WEB_URL|SERVICE_API_URL' .env
+
+# Если пусто или старый IP — добавить/обновить:
+cat >> .env << 'EOF'
+APP_WEB_URL=https://dify-ff.duckdns.org
+CONSOLE_API_URL=https://dify-ff.duckdns.org
+CONSOLE_WEB_URL=https://dify-ff.duckdns.org
+SERVICE_API_URL=https://dify-ff.duckdns.org
+EOF
+
+docker compose up -d --force-recreate
+```
+
+---
+
+*Обновлено: 2026-03-02 — E101-E107: Jitsi/Jibri/HTTPS настройка завершена*
+
 ### E101: STT_PROVIDER незнакомое значение (unknown provider)
 
 **Symptom**: `/health` возвращает 200 но транскрипция падает с `Unknown STT_PROVIDER`.  
