@@ -109,21 +109,22 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "url": "={{ ($env.GLM4_BASE_URL || 'https://api.z.ai/api/anthropic') + '/v1/messages' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.combined }], temperature: 0.2, max_tokens: 1400, stream: false, thinking: { type: 'disabled' } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $env.GLM4_MODEL || 'claude-3-5-haiku-20241022', system: $json.systemPrompt, messages: [{ role: 'user', content: $json.combined }], max_tokens: 1400 }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
+            { "name": "x-api-key", "value": "={{ $env.GLM4_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
             { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "options": { "timeout": 180000, "retry": { "enabled": true, "maxRetries": 3, "waitBetweenRetries": 5000 } }
       },
       "id": "glm-summarize",
-      "name": "GLM-4 Summarize",
+      "name": "LLM Summarize",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [880, -120]
@@ -131,7 +132,7 @@
 
     {
       "parameters": {
-        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst linksData = $('Build Summary Links').first().json;\nconst glmResponse = $json;\n\nconst msg = glmResponse.choices?.[0]?.message || {};\nconst rawContent = (msg.content || '').trim();\nconst content = rawContent || 'Сводка не получена.';\n\nconst dateLabel = meta.dateLabel;\nconst leadList = (meta.leadIds || []).map(id => `LEAD-${id}`).join(', ') || '—';\n\n// Header\nconst header = `<b>📊 Дайджест за ${dateLabel}</b>\\nВстреч: ${meta.count} | Клиентов: ${(meta.leadIds||[]).length}`;\n\n// Summaries block\nconst linksBlock = linksData.linkBlock ? `\\n\\n<b>📂 Саммари и RAG:</b>\\n${linksData.linkBlock}` : '';\n\nconst digest = `${header}\\n\\n${content}${linksBlock}`.trim();\n\nreturn [{ json: { digest, summaryText: content, rowIds: meta.rowIds } }];"
+        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst linksData = $('Build Summary Links').first().json;\nconst resp = $json;\n\n// Support both Anthropic and OpenAI response formats\nlet rawContent = '';\nif (resp.content && Array.isArray(resp.content)) {\n  rawContent = resp.content.filter(b => b.type === 'text').map(b => b.text).join('\\n').trim();\n} else if (resp.choices?.[0]?.message) {\n  rawContent = (resp.choices[0].message.content || resp.choices[0].message.reasoning_content || '').trim();\n}\nconst content = rawContent || 'Сводка не получена.';\n\nconst dateLabel = meta.dateLabel;\nconst leadList = (meta.leadIds || []).map(id => `LEAD-${id}`).join(', ') || '—';\n\n// Header\nconst header = `<b>📊 Дайджест за ${dateLabel}</b>\\nВстреч: ${meta.count} | Клиентов: ${(meta.leadIds||[]).length}`;\n\n// Summaries block\nconst linksBlock = linksData.linkBlock ? `\\n\\n<b>📂 Саммари и RAG:</b>\\n${linksData.linkBlock}` : '';\n\nconst digest = `${header}\\n\\n${content}${linksBlock}`.trim();\n\nreturn [{ json: { digest, summaryText: content, rowIds: meta.rowIds } }];"
       },
       "id": "build-digest",
       "name": "Build Digest",

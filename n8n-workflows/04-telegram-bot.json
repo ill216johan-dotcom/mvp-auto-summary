@@ -171,21 +171,22 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "url": "={{ ($env.GLM4_BASE_URL || 'https://api.z.ai/api/anthropic') + '/v1/messages' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.combined }], temperature: 0.2, max_tokens: 1500, stream: false, thinking: { type: 'disabled' } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $env.GLM4_MODEL || 'claude-3-5-haiku-20241022', system: $json.systemPrompt, messages: [{ role: 'user', content: $json.combined }], max_tokens: 1500 }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}" },
+            { "name": "x-api-key", "value": "={{ $env.GLM4_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
             { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "options": { "timeout": 120000, "retry": { "enabled": true, "maxRetries": 2, "waitBetweenRetries": 5000 } }
       },
       "id": "glm-report",
-      "name": "GLM-4 Report",
+      "name": "LLM Report",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1320, -300]
@@ -193,7 +194,7 @@
 
     {
       "parameters": {
-        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst glmResp = $json;\nconst msg = glmResp.choices?.[0]?.message || {};\nconst content = (msg.content || msg.reasoning_content || 'Сводка не получена.').trim();\nconst leadList = (meta.leadIds || []).map(id => `LEAD-${id}`).join(', ') || '—';\nconst DIFY_URL = $env.DIFY_CHATBOT_URL || 'http://84.252.100.93:8080';\nconst header = `<b>📊 Промежуточный отчёт за ${meta.dateLabel}</b>\\nСозвонов: ${meta.count} | Клиентов: ${(meta.leadIds||[]).length}\\n<a href=\"${DIFY_URL}\">Открыть RAG Ассистент ↗</a>`;\nconst digest = (header + '\\n\\n' + content).trim();\nreturn [{ json: { digest, summaryText: content, rowIds: meta.rowIds, chatId: meta.chatId } }];"
+        "jsCode": "const meta = $('Aggregate Transcripts').first().json;\nconst resp = $json;\n// Support both Anthropic and OpenAI response formats\nlet content = '';\nif (resp.content && Array.isArray(resp.content)) {\n  content = resp.content.filter(b => b.type === 'text').map(b => b.text).join('\\n').trim();\n} else if (resp.choices?.[0]?.message) {\n  const msg = resp.choices[0].message;\n  content = (msg.content || msg.reasoning_content || '').trim();\n}\nif (!content) content = 'Сводка не получена.';\nconst leadList = (meta.leadIds || []).map(id => `LEAD-${id}`).join(', ') || '—';\nconst DIFY_URL = $env.DIFY_CHATBOT_URL || 'http://84.252.100.93:8080';\nconst header = `<b>📊 Промежуточный отчёт за ${meta.dateLabel}</b>\\nСозвонов: ${meta.count} | Клиентов: ${(meta.leadIds||[]).length}\\n<a href=\"${DIFY_URL}\">Открыть RAG Ассистент ↗</a>`;\nconst digest = (header + '\\n\\n' + content).trim();\nreturn [{ json: { digest, summaryText: content, rowIds: meta.rowIds, chatId: meta.chatId } }];"
       },
       "id": "build-report",
       "name": "Build Report",

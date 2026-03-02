@@ -68,16 +68,20 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "url": "={{ ($env.GLM4_BASE_URL || 'https://api.z.ai/api/anthropic') + '/v1/messages' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'glm-4.7-flash', messages: [{ role: 'system', content: $('Prepare Prompt').first().json.systemPrompt }, { role: 'user', content: $json.transcript_text }], temperature: 0.1, max_tokens: 1000, stream: false, response_format: { type: 'json_object' }, thinking: { type: 'disabled' } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $env.GLM4_MODEL || 'claude-3-5-haiku-20241022', system: $('Prepare Prompt').first().json.systemPrompt, messages: [{ role: 'user', content: $json.transcript_text }], max_tokens: 1000 }) }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
-              "name": "Authorization",
-              "value": "={{ 'Bearer ' + $env.GLM4_API_KEY }}"
+              "name": "x-api-key",
+              "value": "={{ $env.GLM4_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
             },
             {
               "name": "Content-Type",
@@ -102,7 +106,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const result = $json;\nlet tasks = [];\n\ntry {\n  const content = result.choices[0].message.content;\n  tasks = JSON.parse(content);\n  if (!Array.isArray(tasks)) tasks = [tasks]; // Fallback if AI returns single object\n} catch (e) {\n  tasks = [];\n}\n\n// Get original data from previous node (because N8N HTTP request replaces $json)\nconst original = $('Has Data?').first().json;\n\nreturn [{\n  json: {\n    ...original,\n    tasks: tasks,\n    hasTasks: tasks.length > 0\n  }\n}];"
+        "jsCode": "const result = $json;\nlet tasks = [];\n\ntry {\n  // Support both Anthropic and OpenAI response formats\n  let content = '';\n  if (result.content && Array.isArray(result.content)) {\n    content = result.content.filter(b => b.type === 'text').map(b => b.text).join('\\n').trim();\n  } else if (result.choices && result.choices[0]) {\n    content = (result.choices[0].message.content || '').trim();\n  }\n  tasks = JSON.parse(content);\n  if (!Array.isArray(tasks)) tasks = [tasks]; // Fallback if AI returns single object\n} catch (e) {\n  tasks = [];\n}\n\n// Get original data from previous node (because N8N HTTP request replaces $json)\nconst original = $('Has Data?').first().json;\n\nreturn [{\n  json: {\n    ...original,\n    tasks: tasks,\n    hasTasks: tasks.length > 0\n  }\n}];"
       },
       "id": "parse-json",
       "name": "Parse JSON Output",
