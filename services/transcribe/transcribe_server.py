@@ -147,34 +147,61 @@ def transcribe_whisper(filepath, filename):
     Отправляет файл на faster-whisper HTTP сервис (WHISPER_URL).
     Совместим с: faster-whisper-server, whisper.cpp server, openai-whisper-api-server.
     """
-    with open(filepath, 'rb') as f:
-        audio_data = f.read()
-
-    boundary = '----TranscribeBoundary'
+    original_filepath = filepath
     ext = filepath.rsplit('.', 1)[-1].lower()
-    mime = {
-        'ogg': 'audio/ogg', 'webm': 'audio/webm', 'mp3': 'audio/mpeg',
-        'wav': 'audio/wav', 'm4a': 'audio/mp4'
-    }.get(ext, 'application/octet-stream')
+    tmp_audio = None
+    
+    try:
+        # Если файл видео (mp4, webm) - извлекаем аудио
+        video_extensions = ('mp4', 'webm', 'avi', 'mov', 'mkv')
+        if ext in video_extensions:
+            log(f'Extracting audio from video: {filename}')
+            tmp_audio = tempfile.mktemp(suffix='.wav')
+            subprocess.run([
+                'ffmpeg', '-i', filepath,
+                '-vn', '-acodec', 'pcm_s16le',
+                '-ar', '16000', '-ac', '1',
+                tmp_audio, '-y'
+            ], capture_output=True, timeout=300, check=True)
+            filepath = tmp_audio
+            ext = 'wav'
+            log(f'Audio extracted successfully: {tmp_audio}')
+        
+        with open(filepath, 'rb') as f:
+            audio_data = f.read()
 
-    body = (
-        f'--{boundary}\r\n'
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f'Content-Type: {mime}\r\n\r\n'
-    ).encode() + audio_data + f'\r\n--{boundary}\r\n'.encode() + (
-        f'Content-Disposition: form-data; name="language"\r\n\r\nru\r\n'
-        f'--{boundary}--\r\n'
-    ).encode()
+        boundary = '----TranscribeBoundary'
+        mime = {
+            'ogg': 'audio/ogg', 'webm': 'audio/webm', 'mp3': 'audio/mpeg',
+            'wav': 'audio/wav', 'm4a': 'audio/mp4'
+        }.get(ext, 'application/octet-stream')
 
-    req = urllib.request.Request(
-        WHISPER_URL + '/v1/audio/transcriptions',
-        data=body,
-        headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
-        method='POST'
-    )
-    r = urllib.request.urlopen(req, timeout=600)
-    result = json.loads(r.read())
-    return result.get('text', '')
+        body = (
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f'Content-Type: {mime}\r\n\r\n'
+        ).encode() + audio_data + f'\r\n--{boundary}\r\n'.encode() + (
+            f'Content-Disposition: form-data; name="language"\r\n\r\nru\r\n'
+            f'--{boundary}--\r\n'
+        ).encode()
+
+        req = urllib.request.Request(
+            WHISPER_URL + '/v1/audio/transcriptions',
+            data=body,
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            method='POST'
+        )
+        r = urllib.request.urlopen(req, timeout=600)
+        result = json.loads(r.read())
+        return result.get('text', '')
+    finally:
+        # Cleanup temporary audio file
+        if tmp_audio and os.path.exists(tmp_audio):
+            try:
+                os.remove(tmp_audio)
+                log(f'Temporary file removed: {tmp_audio}')
+            except Exception as e:
+                log(f'Failed to remove temp file: {e}')
 
 
 # ── Провайдер: AssemblyAI ────────────────────────────────────────────────────────────────────────────────

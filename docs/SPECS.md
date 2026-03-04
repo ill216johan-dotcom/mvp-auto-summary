@@ -1,7 +1,7 @@
 # MVP Auto-Summary: Architecture & Specifications
 
-> **Version:** 1.1 | **Date:** 2026-02-18  
-> **Status:** E2E тест пройден. Whisper medium STT. Claude через z.ai.  
+> **Version:** 1.0 | **Date:** 2026-02-18  
+> **Status:** Phase 0 — MVP  
 > **Strategy:** Buy over Build — no custom backend
 
 ---
@@ -24,7 +24,7 @@ System for automatic meeting transcription and summarization at a fulfillment co
 ```
                     ┌──────────────────────────────────────────────────┐
                     │                VPS (Ubuntu 22.04)                │
-                    │            10 vCPU / 15 GB RAM               │
+                    │                2 vCPU / 8 GB RAM                 │
                     │                                                  │
                     │  ┌─────────────────────────────────────────────┐ │
                     │  │            docker-compose                   │ │
@@ -129,7 +129,7 @@ System for automatic meeting transcription and summarization at a fulfillment co
 
 **Docker**: `onerahmet/openai-whisper-asr-webservice:latest-cpu`  
 **Engine**: faster-whisper (CTranslate2 — в 4x быстрее оригинального Whisper)  
-**API**: `POST http://whisper:8000/asr?task=transcribe&language=ru&output=json`
+**API**: `POST http://whisper:9000/asr?task=transcribe&language=ru&output=json`
 
 **Модели и ресурсы:**
 
@@ -141,7 +141,7 @@ System for automatic meeting transcription and summarization at a fulfillment co
 | **medium** | **+3 GB** | **~40 мин** | **~5%** |
 | large-v3 | +5 GB | ~90 мин | ~3% |
 
-**Рекомендация**: модель `medium` — баланс качества и скорости. VPS нужен 15 GB RAM (medium ~3.5GB + система).
+**Рекомендация**: модель `medium` — баланс качества и скорости. VPS нужен 8 GB RAM.
 
 **Простой flow (без конвертации, без S3, без polling):**
 1. n8n отправляет WebM файл напрямую в Whisper
@@ -381,11 +381,12 @@ mvp-auto-summary/
 
 | Component | Cost | Notes |
 |-----------|------|-------|
-| VPS (10 vCPU, 15 GB RAM) | ~4,000 RUB | Ubuntu, Xeon Gold 6240R |
-| Whisper medium (self-hosted) | **0 RUB** | Бесплатно, ~3.5GB RAM |
-| Claude 3.5 Haiku (z.ai) | ~500 RUB | ~$0.01 per summary |
-| **TOTAL** | **~4,500 RUB/month** | |
-> **Экономия 85%** по сравнению с первоначальным планом (27,500 → 4,500 руб).
+| VPS (2 vCPU, 8 GB RAM) | ~2,500 RUB | Ubuntu 22.04 |
+| Whisper (self-hosted) | **0 RUB** | Бесплатно, работает на VPS |
+| GLM-4.7-FlashX API | ~300 RUB | ~$0.005 per summary |
+| **TOTAL** | **~2,800 RUB/month** | |
+
+> **Экономия 90%** по сравнению с первоначальным планом (27,500 → 2,800 руб).
 
 ---
 
@@ -744,7 +745,7 @@ python3 combine_client_data.py --send-telegram --bot-token ТОКЕН --chat-id 
 
 ## 15. Статус на 2026-02-20 (тестирование с реальными данными)
 
-### Сессия 4 — что сделано (2026-02-20, утро)
+### Что сделано сегодня
 
 | Действие | Результат |
 |----------|-----------|
@@ -752,181 +753,21 @@ python3 combine_client_data.py --send-telegram --bot-token ТОКЕН --chat-id 
 | Выгружены 6 чатов через export_telegram_chat.py | ✅ 3153 сообщения суммарно |
 | Залиты в PostgreSQL (chat_messages) | ✅ |
 | Заполнена таблица lead_chat_mapping | ✅ 6 записей |
-| Сгенерированы summaries (--all-history) по всей истории | ✅ 6 .md файлов |
-| Добавлено поле `curators` в lead_chat_mapping | ✅ (пустое, заполнить вручную) |
-| ffmpeg статический бинарь установлен на хосте | ✅ `/usr/local/bin/ffmpeg` v7.0.2-static |
-| ffmpeg проброшен в n8n контейнер через volume | ✅ работает внутри контейнера |
-| Workflow 01 обновлён: ffmpeg → ogg → Whisper | ✅ (оба узла обновлены через API) |
-| Workflow 01 обновлён: фильтр файлов > 100MB | ✅ |
-| Workflow 01 обновлён: поддержка тире в имени файла | ✅ `4590-фф.webm` → lead_id=4590 |
-| Дублирующие workflows деактивированы | ✅ активен только ZCtnggR6qrPy7bS6 |
-| Whisper контейнер пересоздан (v1.4.0, medium модель) | ✅ faster-whisper v1.0.1 |
-| Зависшие `transcribing` записи сброшены | ✅ processed_files чистый |
-| docker-compose.yml синхронизирован с сервером | ✅ |
+| Запущена суммаризация всей истории (--all-history) | 🔄 В процессе |
 
 ### Договоры в системе
 
 Подробнее: см. `docs/CONTRACTS_AND_RAG.md`
 
-| lead_id | Чат | Сообщений | Куратор |
-|---------|-----|-----------|---------|
-| 4405 | Фулфилмент Платформа ФФ-4405 | 1463 | ? |
-| 987 | Фулфилмент ФФ-987 | 297 | ? |
-| 1381 | ФФ-1381_ТМП/Юнна | 1341 | ? |
-| 2048 | Александр ФФ-2048 | 2 | ? |
-| 4550 | Александр ФФ-4550 | 38 | ? |
-| 506 | Юлия ФФ-506 | 12 | ? |
-
-> **Нужно заполнить**: поле `curators` в таблице `lead_chat_mapping`. Спросить у руководителя.
-
-### Реальные аудиозаписи в /mnt/recordings/2026/02/20/
-
-| Файл | Размер | lead_id | Статус |
-|------|--------|---------|--------|
-| 4590-фф.webm | 47MB | 4590 | ⏳ ожидает (< 100MB, будет обработан) |
-| 1000023_ракурс техно.webm | 71MB | 1000023 | ⏳ ожидает (нет в lead_chat_mapping) |
-| 2026-02-13T15_31_43.482Z.webm | 19MB | UNKNOWN | ⏳ ожидает (нет LEAD_ID) |
-| 2048-ФФ.webm | 187MB | 2048 | ❌ пропущен (> 100MB) |
-| 2239-фф.webm | 414MB | 2239 | ❌ пропущен (> 100MB) |
-| 1000097_2026-02-13.webm | 978MB | 1000097 | ❌ пропущен (> 100MB) |
-| 0_путь_писат.webm | 298MB | UNKNOWN | ❌ пропущен (> 100MB) |
-
-> **Большие файлы** (> 100MB) превышают n8n execution timeout (30 мин при скорости 1.5x).
-> Для них нужна отдельная ручная обработка или увеличение EXECUTIONS_TIMEOUT.
-
-### Производительность Whisper (измерено 2026-02-20)
-
-- **Модель**: medium (faster-whisper v1.0.1, CPU-only)
-- **Скорость**: ~1.5x реального времени (45 сек на 30 сек аудио)
-- **Качество**: отличное распознавание русского (пример: `"То есть вы еще ранее, да, работали?"`)
-- **Рекомендация**: файлы > 30 минут не влезают в 30-минутный n8n таймаут
-
-### Что нужно сделать дальше
-
-| Задача | Приоритет | Кто делает |
-|--------|-----------|------------|
-| Запустить Workflow 01 вручную (кнопка Execute в n8n UI) | 🔴 HIGH | Вручную |
-| Заполнить поле `curators` в lead_chat_mapping | 🟡 MEDIUM | Вручную (спросить у руководителя) |
-| Переработать промпты GLM-4 (STATS_JSON + SUMMARY_MD) | 🟡 MEDIUM | Авто |
-| Новый формат Telegram-дайджеста (по кураторам) | 🟡 MEDIUM | Авто |
-| Поднять nginx на порту 8080 для раздачи .md файлов | 🟡 MEDIUM | Авто |
-| Обработать большие файлы (> 100MB) вручную | 🟠 LOW | Вручную / Авто |
+| lead_id | Чат | Сообщений |
+|---------|-----|-----------|
+| 4405 | Фулфилмент Платформа ФФ-4405 | 1463 |
+| 987 | Фулфилмент ФФ-987 | 297 |
+| 1381 | ФФ-1381_ТМП/Юнна | 1341 |
+| 2048 | Александр ФФ-2048 | 2 |
+| 4550 | Александр ФФ-4550 | 38 |
+| 506 | Юлия ФФ-506 | 12 |
 
 ---
 
-## 16. Архитектура ffmpeg в n8n (2026-02-20)
-
-### Проблема
-
-n8n использует Docker Hardened Images на Alpine (musl libc). Ubuntu-системный ffmpeg (glibc) несовместим.
-
-### Решение
-
-Статический ffmpeg бинарь (musl-совместимый) монтируется в контейнер:
-
-```
-Хост: /usr/local/bin/ffmpeg   (johnvansickle.com, v7.0.2-static, 77MB)
-    ↓ volume mount (read-only)
-Контейнер n8n: /usr/bin/ffmpeg   (работает нативно без доп. библиотек)
-```
-
-docker-compose.yml:
-```yaml
-volumes:
-  - /usr/local/bin/ffmpeg:/usr/bin/ffmpeg:ro   # статический (musl-совместимый)
-```
-
-### Pipeline транскрипции (обновлён)
-
-```
-.webm файл (до 100MB)
-    ↓ ffmpeg (внутри n8n контейнера)
-    ↓ -vn -acodec libopus -b:a 32k → /tmp/audio_TIMESTAMP.ogg
-    ↓ curl POST http://whisper:9000/asr
-    ↓ JSON { text: "расшифровка..." }
-    ↓ rm /tmp/audio_TIMESTAMP.ogg
-    → PostgreSQL processed_files (status=completed)
-    → open-notebook (сохранить транскрипт)
-```
-
----
-
-*Document created: 2026-02-18 | Updated: 2026-03-02 (сессия 5) — E2E тест, сервер 15GB/10CPU, Whisper medium, z.ai/Claude*
-
----
-
-## 18. Текущее состояние системы (2026-03-02, после E2E теста)
-
-### Серверные ресурсы (обновлены 2026-03-01)
-
-| Параметр | Было | Стало |
-|----------|------|-------|
-| RAM | 7.8 GB | **15 GB** |
-| CPU | ? | **10 cores (Xeon Gold 6240R)** |
-| OS | Ubuntu 22.04 | Ubuntu 22.04 |
-| IP | 84.252.100.93 | 84.252.100.93 |
-
-### STT: Whisper self-hosted (medium)
-
-- **Провайдер**: `STT_PROVIDER=whisper`
-- **URL**: `http://whisper:8000` (внутри Docker network)
-- **Модель**: `medium` (faster-whisper, ~3.5 GB RAM)
-- **Качество**: Отличное распознавание русского (1574 символов из 2:12 аудио)
-- **Скорость**: ~5 мин на 2:12 аудио (CPU-only)
-- **Особенность**: НЕ галлюцинирует на тишине (возвращает 0 символов)
-- **ВАЖНО**: `WHISPER_URL` должен быть `http://whisper:8000` (не 9000!)
-
-### LLM: Claude 3.5 Haiku через z.ai
-
-- **КРИТИЧНО**: Несмотря на имя переменных `GLM4_*`, API = **Anthropic Messages API**
-- **Endpoint**: `POST https://api.z.ai/api/anthropic/v1/messages`
-- **Модель**: `claude-3-5-haiku-20241022`
-- **Авторизация**: `x-api-key` header + `anthropic-version: 2023-06-01`
-- **НЕ OpenAI формат**: не `/chat/completions`, не `Authorization: Bearer`
-
-### RAG: Dify.ai
-
-- **UI**: `http://84.252.100.93` (порт 80)
-- **Chatbot**: `http://84.252.100.93/chat/71pymtobibxuwqbc` (app: «ФФ Ассистент Куратора»)
-- **App API key**: `app-UWjC7PoQEUMIPQB4ZlKRI1jh`
-- **Dataset API key**: `dataset-k7rrBrS6TsEixGGIyAvywfb0`
-- **Проблема**: Embedding-модель НЕ настроена → RAG на keyword-search → качество низкое
-- **Контейнер embeddings**: `text-embeddings-inference` на порту 8081 (работает, но Dify не подключён)
-
-### Архитектура STT: Strategy Pattern
-
-```
-transcribe_server.py
-    ├── STTAdapter (абстрактный)
-    │   ├── SpeechKitAdapter   → Yandex SpeechKit API
-    │   ├── WhisperAdapter     → self-hosted faster-whisper (порт 8000)
-    │   └── AssemblyAIAdapter  → AssemblyAI API
-    │
-    └── Выбор через .env: STT_PROVIDER=whisper|speechkit|assemblyai
-```
-
-Переключение провайдера: изменить `STT_PROVIDER` в `.env` → `docker compose up -d`.
-
-### E2E тест — результаты (2026-03-02)
-
-| Этап | Вход | Выход | Статус |
-|------|------|-------|--------|
-| WF01 | `4405_тестовый_2026-03-01.webm` (2:12) | 1574 символов транскрипт | ✅ |
-| WF03 | Транскрипт | 1521 символ Markdown summary + Dify doc | ✅ |
-| WF02 | Summary | Telegram message_id=350 | ✅ |
-| Dify RAG | Вопрос через chatbot | Ошибка индексации | ⚠️ |
-
-### Docker Compose — ключевое
-
-- `docker compose restart` **НЕ** перезагружает `.env` — нужно `docker compose up -d`
-- Все контейнеры имеют `restart: unless-stopped` — автостарт после reboot
-- Whisper medium стабилен при 15GB RAM (ранее OOM при 7.8GB)
-
-### Нерешённые проблемы
-
-1. **Dify embedding**: Настроить Model Provider в Dify UI для векторного поиска
-2. **WF03 API формат**: n8n хардкодит OpenAI формат, а LLM = Anthropic через z.ai
-3. **WF01 retry timeout**: Транскрипт готов, но WF01 помечает как error (race condition)
-4. **Большие файлы**: >30 мин аудио → timeout при транскрипции на CPU
-
-*Обновлено: 2026-03-02*
+*Document created: 2026-02-18 | Updated: 2026-02-20 — Phase 2: реальные данные, 6 договоров, RAG-система*
