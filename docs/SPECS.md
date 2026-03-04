@@ -13,8 +13,8 @@ System for automatic meeting transcription and summarization at a fulfillment co
 **What it does (Phase 0):**
 1. Manager conducts a call in Jitsi (room name: `LEAD-{ID}-conf`)
 2. Jibri records the meeting → file lands on NFS server
-3. Python orchestrator detects new file → sends audio to Whisper (self-hosted)
-4. Whisper returns transcript → saved to PostgreSQL + Dify Knowledge Base
+3. Python orchestrator detects new file → ставит задачу в transcribe очередь
+4. Transcribe worker вызывает Whisper → результат сохраняется в PostgreSQL + Dify
 5. Daily at 23:00: orchestrator collects all transcripts → Claude summarizes → Telegram digest
 
 ---
@@ -143,6 +143,11 @@ scheduler.add_job(
 **Docker**: `fedirz/faster-whisper-server:latest-cpu`  
 **API**: `POST http://whisper:8000/v1/audio/transcriptions`
 
+**Асинхронная обработка (2026-03-04):**
+- transcribe сервис принимает запрос и сразу возвращает `queued`
+- фоновые воркеры (TRANSCRIBE_WORKERS) обрабатывают очередь
+- статусы в processed_files: `queued` → `transcribing` → `completed|error`
+
 **Модели:**
 
 | Модель | RAM | Скорость (60 мин) | Качество RU |
@@ -168,6 +173,14 @@ Per-client Knowledge Bases в Dify:
 - Каждый клиент = свой dataset
 - Summaries push'атся через API
 - RAG-чат через Dify Chatbot
+
+**Embedding (обязательно для индексации):**
+- `embeddings` (text-embeddings-inference) слушает `http://embeddings:80`
+- Dify `docker/.env`: `ALLOW_EMBED=true`, `OPENAI_API_BASE=http://embeddings/v1`
+- Dify UI → Settings → Model Providers: OpenAI-compatible
+  - API Key: `local-embeddings`
+  - Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+  - Set as default for **text-embedding**
 
 ---
 
@@ -256,6 +269,7 @@ extracted_tasks (
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Whisper backlog | Digest delay | Small model, off-peak |
+| Параллельные созвоны не записываются | Потеря части записей | Масштабировать Jibri (2+ инстанса) |
 | Dify API changes | RAG broken | Pin version, test upgrades |
 
 ---
@@ -365,11 +379,109 @@ mvp-auto-summary/
 
 | Сервис | URL | Данные |
 |--------|-----|--------|
+| **VPS Server** | `ssh root@84.252.100.93` | Доступы в `docs/CREDENTIALS.md` (локально) |
 | Telegram Bot | `@ffp_report_bot` | Token в .env |
 | Telegram Chat ID | `-1003872092456` | Группа "Отчёты ФФ Платформы" |
 | Dify UI | `https://dify-ff.duckdns.org` | API key в .env |
 | Summaries | `http://84.252.100.93:8181/summaries/` | Static .md files |
 
+> ⚠️ **ВАЖНО:** `docs/CREDENTIALS.md` хранится локально и добавлен в `.gitignore`.
+
 ---
+
+## 13. Roadmap (2026-03-05)
+
+### 🔴 Priority 1 — Dify Embeddings Configuration
+
+**Problem:** WF03 creates summaries but cannot push to Dify (Error 400: `Default model not found for text-embedding`).
+
+**Tasks:**
+1. **Configure Dify embeddings:**
+   - Open Dify UI → Settings → Model Providers
+   - Add "OpenAI-compatible" provider
+   - Base URL: `http://embeddings/v1`
+   - Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+   - Set as Default for Text Embedding
+
+2. **Verify embeddings work:**
+   ```bash
+   curl http://84.252.100.93:8081/v1/embeddings \
+     -H "Content-Type: application/json" \
+     -d '{"input":"test","model":"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"}'
+   ```
+
+3. **Re-run WF03 for 2026-03-04:**
+   ```bash
+   python scripts/trigger_wf03_yesterday.py
+   ```
+
+4. **Check Dify dataset:**
+   - Open https://dify-ff.duckdns.org
+   - Navigate to Knowledge → LEAD-1000139 dataset
+   - Verify document was created and indexed
+
+**Estimated time:** 30-60 min
+
+---
+
+### 🟡 Priority 2 — Fix 3 Error Files from 2026-03-04
+
+**Problem:** 3 files stuck in `status='error'`:
+- `2239.webm`
+- `4550_2026-02-10T09_28_45.370Z.webm`
+- `2048.webm`
+
+**Tasks:**
+1. **Diagnose errors:**
+   ```bash
+   docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT filename, error_message FROM processed_files WHERE status='error' AND DATE(created_at)='2026-03-04';"
+   ```
+
+2. **Check transcribe logs:**
+   ```bash
+   docker logs mvp-auto-summary-transcribe-1 --tail 100 | grep -E '2239|4550|2048'
+   ```
+
+3. **Fix or re-queue:**
+   - If file corruption → delete from processed_files
+   - If transient error → reset status and retry
+
+**Estimated time:** 1-2 hours
+
+---
+
+### 🟢 Priority 3 — Monitoring & Alerting
+
+**Goal:** Get notified when WF03/WF02 fail.
+
+**Tasks:**
+1. **Add error notifications to Telegram:**
+   - Modify `app/scheduler.py` to send Telegram alert on job failure
+   - Include: job_name, error, timestamp
+
+2. **Create health check script:**
+   ```bash
+   scripts/health_check.py  # Check all services, send summary to Telegram
+   ```
+
+3. **Add cron job for health check:**
+   - Run every 6 hours
+   - Send alert if: orchestrator down, DB down, no files processed in 24h
+
+**Estimated time:** 2-3 hours
+
+---
+
+### 🔵 Future Enhancements
+
+- **Web dashboard:** Real-time view of processing status
+- **Multi-client support:** Handle concurrent calls from different clients
+- **Audio quality checks:** Detect silent/corrupted files early
+- **Auto-retry logic:** Retry failed transcriptions with exponential backoff
+- **Weekly reports:** Aggregate weekly summaries per client
+
+---
+
+*Document created: 2026-02-18 | Updated: 2026-03-05 — Added roadmap section with Dify embeddings priority*
 
 *Document created: 2026-02-18 | Updated: 2026-03-04 — Python orchestrator, removed n8n references*

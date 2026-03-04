@@ -111,11 +111,29 @@ GLM4_MODEL=claude-3-5-haiku-20241022
 
 ## 3. Dify.ai (RAG + Knowledge Base)
 
-**UI**: `http://84.252.100.93` (порт 80)  
-**API Base**: `http://84.252.100.93/v1`  
+**UI**: `https://dify-ff.duckdns.org`  
+**API Base**: `https://dify-ff.duckdns.org/v1`  
 **Auth**: `Authorization: Bearer {DIFY_API_KEY}`
 
-> ⚠️ Два типа API ключей:
+**Embeddings (OpenAI-compatible)**:
+- **Container**: `embeddings` (ghcr.io/huggingface/text-embeddings-inference:cpu-latest)
+- **Port**: `8081` (host), `80` (docker internal)
+- **Internal URL**: `http://embeddings/v1`
+- **Model**: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+- **Requirement**: В Dify UI должен быть настроен default model для `text-embedding`
+
+> **ВАЖНО (2026-03-05)**: Для работы Dify API нужно настроить embeddings в Dify UI:
+> 1. Settings → Model Providers → Add "OpenAI-compatible"
+> 2. Base URL: `http://embeddings/v1`
+> 3. API Key: `local-embeddings` (any string)
+> 4. Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+> 5. Set as Default for Text Embedding
+>
+> Без этой настройки API возвращает 400: `Default model not found for text-embedding`
+>
+> См. ERRORS.md → E060
+
+> Два типа API ключей:
 > - `app-xxx` — App API key (для chatbot, из Studio → конкретное приложение)
 > - `dataset-xxx` — Dataset API key (для Knowledge Base, из Знания → Сервисный API)
 > WF03 использует `dataset-xxx` для создания документов в KB.
@@ -140,7 +158,8 @@ DIFY_CHATBOT_URL=http://84.252.100.93
 | LEAD-1381 ФФ-1381 | `54a97db4-3532-41c2-bab0-fd5ac6dc86e8` | Клиент 1381 |
 | LEAD-2048 ФФ-2048 | `205f9a3b-bab3-4967-9887-ed25ea15b506` | Клиент 2048 |
 | LEAD-4550 ФФ-4550 | `be1b0752-4aa5-4a75-a950-993fd4b24353` | Клиент 4550 |
-| LEAD-506 ФФ-506 | `8b5508b7-5e17-470c-9f33-a6d1443d5ea2` | Клиент 506 |
+|| LEAD-506 ФФ-506 | `8b5508b7-5e17-470c-9f33-a6d1443d5ea2` | Клиент 506 |
+|| LEAD-1000139 ФФ-1000139 | `7797fd81-ea1e-4fc5-9b6c-644d356138ac` | Клиент 1000139 (новый) |
 
 ### Список датасетов
 
@@ -188,7 +207,8 @@ Response:
 ```
 
 > Если нет embedding-модели → ошибка `Default model not found for text-embedding`.
-> В таком случае создавать датасеты без `indexing_technique`.
+> **Fix**: Настроить embeddings в Dify UI (см. выше).
+> **Alternative**: `"indexing_technique": "economy"` — без embeddings, но хуже качество поиска.
 
 ### Проверить доступность API
 
@@ -269,7 +289,7 @@ curl -X POST "https://api.telegram.org/bot8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qB
 POST http://transcribe:9001/
 { "filepath": "/recordings/4405_2026-02-26_10-30.webm" }
 
-→ { "status": "processing", "filename": "4405_2026-02-26_10-30.webm" }
+→ { "status": "queued", "filename": "4405_2026-02-26_10-30.webm" }
 ```
 
 ### Check transcription status
@@ -279,7 +299,8 @@ POST http://transcribe:9001/check
 { "filename": "4405_2026-02-26_10-30.webm" }
 
 → { "transcript": "Текст транскрипта...", "status": "completed" }
-→ { "transcript": null, "status": "processing" }   # ещё не готово
+→ { "transcript": null, "status": "queued" }        # ещё в очереди
+→ { "transcript": null, "status": "transcribing" }  # обрабатывается
 → { "transcript": null, "status": "error" }         # ошибка
 ```
 
@@ -288,6 +309,16 @@ POST http://transcribe:9001/check
 ```
 GET http://transcribe:9001/health
 → { "status": "ok", "provider": "whisper" }
+```
+
+### Асинхронные настройки
+
+```
+TRANSCRIBE_WORKERS=2
+TRANSCRIBE_QUEUE_SIZE=50
+WHISPER_TIMEOUT_MIN=600
+WHISPER_TIMEOUT_MAX=86400
+WHISPER_TIMEOUT_MULTIPLIER=4
 ```
 ---
 

@@ -137,6 +137,22 @@ mount -a
 
 ---
 
+### E018: Dify — `Default model not found for text-embedding`
+
+**Symptom**: `POST /v1/datasets` или `create-by-text` возвращает 400 `invalid_param` с сообщением `Default model not found for text-embedding`  
+**Root Cause**: В Dify не настроена модель для text-embedding (нет default provider + model)  
+**Fix**:
+1. В `dify/docker/.env` выставить `ALLOW_EMBED=true` и `OPENAI_API_BASE=http://embeddings/v1`
+2. В Dify UI → **Settings → Model Providers**:
+   - Provider: **OpenAI-compatible**
+   - Base URL: `http://embeddings/v1`
+   - API Key: `local-embeddings`
+   - Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+   - Set as **Default** for text-embedding
+3. Если Dify API контейнер перезапускался — перезапустить `docker-nginx-1`
+
+---
+
 ---
 
 ## Deployment Errors (обнаружены 2026-02-18 при первом запуске)
@@ -743,6 +759,35 @@ Workflow 01 обновлён (2026-02-20): поддерживает формат
 
 ---
 
+### E057: transcribe — очередь переполнена (`queue_full`)
+
+**Symptom**: POST `/` возвращает `503` и `{"status":"error","error":"queue_full"}`
+
+**Root Cause**: Количество задач превысило `TRANSCRIBE_QUEUE_SIZE`, воркеры не успевают.
+
+**Fix**:
+1. Увеличить `TRANSCRIBE_QUEUE_SIZE`
+2. Увеличить `TRANSCRIBE_WORKERS`
+3. Использовать более лёгкую модель (`WHISPER_MODEL=small`)
+
+---
+
+### E058: Jibri — параллельный созвон не записывается (busy)
+
+**Symptom**: второй созвон не начинает запись, Jibri в статусе BUSY
+
+**Root Cause**: запущен только один Jibri-инстанс
+
+**Fix**:
+1. Установить пустой `JIBRI_INSTANCE_ID` в `/opt/jitsi-meet/.env`
+2. Запустить несколько инстансов:
+```bash
+cd /opt/jitsi-meet
+docker compose -f docker-compose.yml -f jibri.yml -f jibri-override.yml up -d --scale jibri=2
+```
+
+---
+
 ---
 
 ## Ошибки Telegram (авторизация и выгрузка чатов)
@@ -957,4 +1002,73 @@ DELETE FROM processed_files WHERE status = 'transcribing';
 
 ---
 
-*Document created: 2026-02-18 | Updated: 2026-02-20 — added E054 (Telethon entity search), E055 (workflow import rename), E056 (files stuck in transcribing)*
+
+---
+
+### E059: WF03 не запускается — контейнер перезапущен после scheduled time
+
+**Symptom**: В 22:00 должен запуститься WF03 (individual_summary), но в логах ничего нет. В `client_summaries` 0 записей за сегодня.
+
+**Root Cause**: Контейнер orchestrator был перезапущен ПОСЛЕ scheduled time (22:00 MSK). APScheduler при старте планирует задачи на СЛЕДУЮЩЕЕ время срабатывания, пропуская прошедшее.
+
+**Диагностика**:
+```bash
+# Проверить когда запустился контейнер
+docker inspect mvp-auto-summary-orchestrator-1 --format '{{.State.StartedAt}}'
+
+# Проверить есть ли записи за сегодня
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT COUNT(*) FROM client_summaries WHERE DATE(summary_date) = CURRENT_DATE;"
+```
+
+**Fix**: Запустить WF03 вручную с нужной датой:
+```bash
+python scripts/trigger_wf03_yesterday.py  # для 2026-03-04
+# или универсальный скрипт:
+python scripts/trigger_wf03_now.py        # спросит дату
+```
+
+---
+
+### E060: Dify — `provider_not_initialize: Default model not found for text-embedding`
+
+**Symptom**: При попытке создать документ через API возвращается 400:
+```json
+{"code":"provider_not_initialize","message":"Default model not found for text-embedding","status":400}
+```
+
+**Root Cause**: В Dify не настроена модель для embeddings. Для индексации документов (high_quality mode) требуется модель text-embedding.
+
+**Диагностика**:
+```bash
+# Проверить что embeddings контейнер запущен
+docker ps | grep embed
+
+# Должен быть: embeddings (port 8081)
+```
+
+**Fix (настройка Dify UI)**:
+
+1. **Dify UI → Settings → Model Providers**
+2. Добавить **OpenAI-compatible** provider:
+   - Name: `Local Embeddings`
+   - Base URL: `http://embeddings/v1` (внутри docker network)
+   - API Key: `local-embeddings` (любая строка)
+   - Models: нажать "Add model"
+     - Model name: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+     - Type: **Text Embedding**
+   - Set as **Default** для Text Embedding
+3. Нажать **Save**
+4. Протестировать создание документа:
+```bash
+curl -X POST https://dify-ff.duckdns.org/v1/datasets/DATASET_ID/document/create-by-text \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Test","text":"Test content","indexing_technique":"high_quality","process_rule":{"mode":"automatic"}}'
+```
+
+**Альтернатива (economy mode)**:
+Если embeddings не нужны, использовать `"indexing_technique": "economy"` — индексация без embeddings, но качество поиска хуже.
+
+---
+
+*Document created: 2026-02-18 | Updated: 2026-03-05 — added E059 (WF03 schedule miss), E060 (Dify embeddings not configured)*
