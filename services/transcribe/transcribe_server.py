@@ -191,7 +191,7 @@ def transcribe_whisper(filepath, filename):
             headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
             method='POST'
         )
-        r = urllib.request.urlopen(req, timeout=600)
+        r = urllib.request.urlopen(req, timeout=7200)  # 2 hours for long files
         result = json.loads(r.read())
         return result.get('text', '')
     finally:
