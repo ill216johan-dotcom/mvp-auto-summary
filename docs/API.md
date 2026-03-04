@@ -337,49 +337,7 @@ $PG -c "DELETE FROM processed_files WHERE status='transcribing' AND created_at <
 
 ---
 
-## 7. n8n Public API
-
-**Base URL**: `http://localhost:5678/api/v1`  
-**Auth**: `X-N8N-API-KEY: {token}` (JWT из таблицы `user_api_keys`)
-
-### Получить список воркфлоу
-
-```bash
-curl http://localhost:5678/api/v1/workflows \
-  -H "X-N8N-API-KEY: TOKEN"
-```
-
-### Импортировать воркфлоу
-
-```bash
-# Обязательно очистить JSON — только name/nodes/connections/settings
-python3 -c "
-import json
-d = json.load(open('workflow.json'))
-payload = {k: d[k] for k in ['name','nodes','connections','settings'] if k in d}
-print(json.dumps(payload))
-" | curl -X POST http://localhost:5678/api/v1/workflows \
-  -H "X-N8N-API-KEY: TOKEN" \
-  -H "Content-Type: application/json" -d @-
-```
-
-### Активировать воркфлоу
-
-```bash
-curl -X POST "http://localhost:5678/api/v1/workflows/{id}/activate" \
-  -H "X-N8N-API-KEY: TOKEN"
-```
-
-### Получить API key из БД
-
-```bash
-docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
-  -c "SELECT label, LEFT(\"apiKey\",40) FROM public.user_api_keys ORDER BY \"createdAt\" DESC LIMIT 5;"
-```
-
----
-
-## 8. summaries-nginx (статические файлы)
+## 7. summaries-nginx (статические файлы)
 
 **URL**: `http://84.252.100.93:8181`  
 **Путь к файлам**: `/summaries/YYYY-MM-DD/LEAD-XXXX_type_YYYY-MM-DD.md`
@@ -400,15 +358,14 @@ curl http://localhost:8181/health
 # → ok
 ```
 
-### Записать .md файл (из n8n Code node)
+### Записать .md файл
 
-WF03 должен записывать файлы в volume `summaries_data`:
-```javascript
-// В n8n нет прямого доступа к файловой системе — используй Write Binary File node
-// Путь внутри контейнера: /summaries/YYYY-MM-DD/LEAD-XXX_call_YYYY-MM-DD.md
+Python orchestrator записывает файлы в volume `summaries_data`:
+```
+/summaries/YYYY-MM-DD/LEAD-XXX_call_YYYY-MM-DD.md
 ```
 
-## 10. Whisper API (self-hosted, faster-whisper-server)
+## 8. Whisper API (self-hosted, faster-whisper-server)
 
 **URL (docker network)**: `http://whisper:8000`  
 **ВАЖНО**: Порт **8000**, не 9000!
@@ -447,4 +404,4 @@ WHISPER_MODEL=medium
 
 ---
 
-*Обновлено: 2026-03-02 — LLM = Claude/z.ai (Anthropic API), STT = Whisper medium self-hosted, transcribe с Strategy Pattern*
+*Обновлено: 2026-03-04 — Удалена секция n8n API (legacy), LLM = Claude/z.ai (Anthropic API), STT = Whisper*
