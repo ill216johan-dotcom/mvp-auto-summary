@@ -25,7 +25,7 @@ class DifyClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=60.0)
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=2, max=15), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30), reraise=True)
     def create_document_by_text(
         self,
         dataset_id: str,

@@ -22,20 +22,32 @@ from app.core.logger import get_logger
 from app.core.telegram_api import TelegramSender
 from app.tasks.daily_digest import DailyDigestTask
 from app.tasks.deadline_extractor import DeadlineExtractorTask
+from app.tasks.healthcheck import run_healthcheck
 from app.tasks.individual_summary import IndividualSummaryTask
 from app.tasks.scan_recordings import RecordingScanner
 
 log = get_logger("scheduler")
 
+telegram_client: TelegramSender | None = None
+
 
 def _on_job_event(event: JobEvent) -> None:
-    """Log job execution results."""
+    """Log job execution results and send Telegram alerts on failure."""
     if event.exception:
         log.error(
             "job_failed",
             job_id=event.job_id,
             error=str(event.exception),
+            exc_info=True,
         )
+        if telegram_client:
+            try:
+                telegram_client.send_message(
+                    chat_id=telegram_client.default_chat_id,
+                    text=f"❌ **Job Failed**: {event.job_id}\n\nError: {str(event.exception)}",
+                )
+            except Exception as e:
+                log.error("telegram_alert_failed", error=str(e))
     else:
         log.debug("job_executed", job_id=event.job_id)
 
@@ -56,8 +68,19 @@ def create_scheduler(
       - individual_summary: daily at HH:00 (WF03)
       - deadline_extractor: every 15 min (WF06)
       - daily_digest: daily at HH:00 (WF02)
+      - healthcheck: every 30 min (trigger missed jobs)
     """
-    scheduler = BackgroundScheduler(timezone=settings.timezone)
+    global telegram_client
+    telegram_client = telegram
+    
+    scheduler = BackgroundScheduler(
+        timezone=settings.timezone,
+        job_defaults={
+            "coalesce": True,
+            "max_instances": 1,
+            "misfire_grace_time": 3600,
+        },
+    )
     scheduler.add_listener(_on_job_event, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
     # ── Task instances ────────────────────────────────────────
@@ -131,6 +154,19 @@ def create_scheduler(
         id="daily_digest",
         name="WF02: Daily digest → Telegram",
         max_instances=1,
+    )
+
+    # ── Schedule: Healthcheck — Every 30 min ───────────────────
+    def healthcheck_wrapper():
+        run_healthcheck(db, summary_task, digest_task)
+
+    scheduler.add_job(
+        healthcheck_wrapper,
+        IntervalTrigger(minutes=30),
+        id="healthcheck",
+        name="Healthcheck: trigger missed jobs",
+        max_instances=1,
+        coalesce=True,
     )
 
     log.info(

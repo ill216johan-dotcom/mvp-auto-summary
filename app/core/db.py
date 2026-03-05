@@ -226,6 +226,22 @@ class Database:
                 (d,),
             )
 
+    def is_digest_sent(self, target_date: date | None = None) -> bool:
+        """Check if digest was already sent for the given date."""
+        d = target_date or date.today()
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) > 0
+                FROM processed_files
+                WHERE COALESCE(file_date, created_at::date) = %s
+                  AND status = 'completed'
+                  AND summary_sent = true
+                """,
+                (d,),
+            )
+            return cur.fetchone()[0]
+
     # ══════════════════════════════════════════════════════════
     # WF03: Individual Summaries
     # ══════════════════════════════════════════════════════════
