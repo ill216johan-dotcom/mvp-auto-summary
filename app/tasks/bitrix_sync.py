@@ -99,38 +99,43 @@ def _enrich_call_record_urls(client: Any, conn: Any, lead: dict, stats: dict) ->
 
     for rec in records:
         record_url = rec.get("CALL_RECORD_URL") or rec.get("SRC_URL") or ""
-        if not record_url:
-            continue
         bitrix_call_id = rec.get("CALL_ID", "")
+        phone_number = rec.get("PHONE_NUMBER", "")
+
+        # Skip if neither record_url nor phone_number
+        if not record_url and not phone_number:
+            continue
         try:
             cur = conn.cursor()
             try:
                 # Match by bitrix_call_id if available, otherwise by lead + approximate date
                 if bitrix_call_id:
+                    phone_number = rec.get("PHONE_NUMBER", "")
                     cur.execute(
                         """
                         UPDATE bitrix_calls
-                        SET record_url = %s, transcript_status = 'pending'
+                        SET record_url = %s, phone_number = %s, transcript_status = 'pending'
                         WHERE bitrix_call_id = %s
                           AND transcript_status = 'no_record'
                         """,
-                        (record_url, bitrix_call_id),
+                        (record_url, phone_number, bitrix_call_id),
                     )
                 else:
                     # Fallback: match by lead_id + call date (within same minute)
                     call_start = rec.get("CALL_START_DATE")
+                    phone_number = rec.get("PHONE_NUMBER", "")
                     if call_start:
                         cur.execute(
                             """
                             UPDATE bitrix_calls
-                            SET record_url = %s, transcript_status = 'pending'
+                            SET record_url = %s, phone_number = %s, transcript_status = 'pending'
                             WHERE bitrix_lead_id = %s
                               AND transcript_status = 'no_record'
                               AND DATE_TRUNC('minute', call_date) =
                                   DATE_TRUNC('minute', %s::timestamptz)
                             LIMIT 1
                             """,
-                            (record_url, lead["bitrix_lead_id"], call_start),
+                            (record_url, phone_number, lead["bitrix_lead_id"], call_start),
                         )
                 conn.commit()
                 if cur.rowcount and cur.rowcount > 0:
