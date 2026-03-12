@@ -70,5 +70,35 @@ class DifyClient:
         log.info("dify_doc_created", dataset_id=dataset_id, doc_id=doc_id, name=name)
         return doc_id
 
+    def create_dataset(self, name: str) -> str:
+        """
+        Create a new Dify dataset (Knowledge Base) and return its ID.
+
+        Args:
+            name: Dataset name (e.g. "LEAD-42" or "BX-LEAD-100").
+
+        Returns:
+            New dataset UUID string, or empty string on failure.
+        """
+        if not self.api_key:
+            log.warning("dify_create_dataset_skip", reason="no api_key")
+            return ""
+
+        url = f"{self.base_url}/v1/datasets"
+        payload = {"name": name}
+        response = self._client.post(
+            url,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        dataset_id = data.get("id", "")
+        log.info("dify_dataset_created", dataset_id=dataset_id, name=name)
+        return dataset_id
+
     def close(self) -> None:
         self._client.close()

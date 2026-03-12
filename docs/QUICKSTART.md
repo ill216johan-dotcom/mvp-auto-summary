@@ -1,7 +1,7 @@
 # Быстрый старт MVP Auto-Summary
 
 > Пошаговая инструкция запуска системы.
-> Обновлено: 2026-03-04 — Python orchestrator (без n8n).
+> Обновлено: 2026-03-09 — добавлена Bitrix24 интеграция.
 
 > ⚠️ **Перед тем как начать** — прочитай `docs/ERRORS.md`.
 
@@ -13,10 +13,12 @@
 - [ ] VPS с Ubuntu 22.04 (2 vCPU, **8 GB RAM**, 40 GB диск)
 - [ ] API-ключ Claude (через z.ai) — [получить здесь](https://z.ai)
 - [ ] Telegram-бот (создать через @BotFather) + chat_id группы
+- [ ] Dify API ключ (`dataset-zyLYATai9CmALb3SzNYkRkjk` — уже настроен)
 
 ### От руководителя:
-- [ ] IP NFS-сервера и путь к папке с записями
+- [ ] IP NFS-сервера и путь к папке с записями (для Jitsi)
 - [ ] Настроенный Jitsi + Jibri (записи падают на NFS)
+- [ ] Bitrix24 webhook URL (уже есть: `https://bitrix24.ff-platform.ru/rest/1/fhh009wpvmby0tn6/`)
 
 ---
 
@@ -25,7 +27,7 @@
 ### 1.1 Подключись к серверу
 
 ```bash
-ssh root@YOUR_VPS_IP
+ssh -i C:\Users\User\.ssh\mvp_server -o StrictHostKeyChecking=no root@84.252.100.93
 ```
 
 ### 1.2 Установи Docker
@@ -43,7 +45,7 @@ docker --version
 apt install -y git nfs-common ffmpeg
 ```
 
-### 1.4 Смонтируй NFS
+### 1.4 Смонтируй NFS (для Jitsi-записей)
 
 ```bash
 mkdir -p /mnt/recordings
@@ -77,13 +79,30 @@ nano .env
 
 **Обязательно заполни:**
 
-| Переменная | Где взять |
-|------------|-----------|
-| `POSTGRES_PASSWORD` | Придумай надёжный пароль |
-| `GLM4_API_KEY` | [z.ai](https://z.ai) → API Keys |
-| `TELEGRAM_BOT_TOKEN` | @BotFather в Telegram |
-| `TELEGRAM_CHAT_ID` | См. инструкцию ниже |
-| `DIFY_API_KEY` | Dify → Знания → Сервисный API |
+| Переменная | Где взять | Текущее значение |
+|------------|-----------|-----------------|
+| `POSTGRES_PASSWORD` | Придумай надёжный пароль | — |
+| `GLM4_API_KEY` | [z.ai](https://z.ai) → API Keys | уже настроен |
+| `TELEGRAM_BOT_TOKEN` | @BotFather в Telegram | уже настроен |
+| `TELEGRAM_CHAT_ID` | См. инструкцию ниже | уже настроен |
+| `DIFY_API_KEY` | Dify → Знания → Сервисный API | `dataset-zyLYATai9CmALb3SzNYkRkjk` |
+| `BITRIX_WEBHOOK_URL` | Битрикс24 → Настройки → REST API | `https://bitrix24.ff-platform.ru/rest/1/fhh009wpvmby0tn6/` |
+
+**Bitrix-переменные (добавить в .env):**
+
+```env
+BITRIX_WEBHOOK_URL=https://bitrix24.ff-platform.ru/rest/1/fhh009wpvmby0tn6/
+BITRIX_CONTRACT_FIELD=UF_CRM_1632960743049
+BITRIX_SYNC_HOUR=6
+```
+
+**И в docker-compose.yml в секцию `environment` сервиса orchestrator:**
+
+```yaml
+- BITRIX_WEBHOOK_URL=${BITRIX_WEBHOOK_URL}
+- BITRIX_CONTRACT_FIELD=${BITRIX_CONTRACT_FIELD}
+- BITRIX_SYNC_HOUR=${BITRIX_SYNC_HOUR}
+```
 
 ### Как получить Telegram chat_id:
 
@@ -125,50 +144,129 @@ docker compose --profile whisper up -d whisper
 
 ---
 
-## Шаг 5: Проверь работу (5 минут)
+## Шаг 5: Применить миграцию БД (один раз)
 
-### 5.1 Создай тестовый файл
+Миграция создаёт 6 таблиц для Bitrix синхронизации:
 
 ```bash
-mkdir -p /mnt/recordings/$(date +%Y/%m/%d)
-echo "test" > /mnt/recordings/$(date +%Y/%m/%d)/99999_$(date +%Y-%m-%d)_10-00.wav
+# Скопировать SQL на сервер
+scp -i C:\Users\User\.ssh\mvp_server scripts/migrate_db_v3.sql root@84.252.100.93:/root/
+
+# Применить миграцию
+ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 \
+  "docker exec -i mvp-auto-summary-postgres-1 psql -U n8n -d n8n < /root/migrate_db_v3.sql"
+
+# Проверить таблицы
+ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 \
+  "docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c '\dt bitrix_*'"
 ```
 
-### 5.2 Проверь логи
+Должны появиться таблицы:
+- `bitrix_leads` — лиды и контакты из Битрикса
+- `bitrix_activities` — звонки, письма, комментарии
+- `bitrix_sync_state` — статус синхронизации
+- `bitrix_summaries` — саммари по клиентам
+- `bitrix_dataset_mapping` — соответствие лид → Dify блокнот
+- `bitrix_call_recordings` — метаданные записей звонков
+
+---
+
+## Шаг 6: Историческая синхронизация (первый запуск)
+
+> ⚠️ Этот шаг выполняется **только один раз** — при первом запуске.
+> Синхронизирует ВСЮ историю из Битрикса (30k+ лидов, все звонки/письма).
+
+```bash
+# Скопировать скрипт в контейнер
+docker cp /root/mvp-auto-summary/scripts/run_historical_sync.py \
+  mvp-auto-summary-orchestrator-1:/app/scripts/
+
+# Запустить в фоне (займёт несколько часов)
+nohup docker exec mvp-auto-summary-orchestrator-1 \
+  python /app/scripts/run_historical_sync.py \
+  >> /root/bitrix_sync.log 2>&1 &
+
+echo "Синхронизация запущена. PID: $!"
+```
+
+### Мониторинг прогресса
+
+```bash
+# Следить за логом
+tail -f /root/bitrix_sync.log
+
+# Проверить, жив ли процесс
+ps aux | grep run_historical | grep -v grep
+
+# Итоги в БД (после завершения)
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "
+SELECT
+  (SELECT COUNT(*) FROM bitrix_leads WHERE entity_type='lead') AS leads,
+  (SELECT COUNT(*) FROM bitrix_leads WHERE entity_type='contact') AS contacts,
+  (SELECT COUNT(*) FROM bitrix_activities) AS activities,
+  (SELECT COUNT(*) FROM bitrix_summaries) AS summaries;
+"
+```
+
+---
+
+## Шаг 7: Проверь работу (5 минут)
+
+### 7.1 Проверь логи orchestrator
 
 ```bash
 docker compose logs orchestrator -f
 ```
 
-Должен появиться лог о сканировании файлов.
-
-### 5.3 Проверь базу
+### 7.2 Проверь базу данных
 
 ```bash
+# Jitsi-записи
 docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
   -c "SELECT filename, status FROM processed_files ORDER BY id DESC LIMIT 5;"
+
+# Bitrix-данные
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "SELECT entity_type, COUNT(*) FROM bitrix_leads GROUP BY entity_type;"
 ```
 
-### 5.4 Проверь Telegram бота
+### 7.3 Проверь Dify
+
+Открой `https://dify-ff.duckdns.org` → Knowledge → должны появиться блокноты `ФФ-4405`, `BX-LEAD-*` и т.д.
+
+### 7.4 Проверь Telegram бота
 
 Отправь `/status` в чат с ботом — должен ответить статусом системы.
 
 ---
 
-## Шаг 6: Инициализация базы (один раз)
-
-Если база пустая, выполни:
-
-```bash
-docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
-  -f /docker-entrypoint-initdb.d/init.sql
-```
-
----
-
 ## Как пользоваться
 
-### Ежедневная работа
+### Ежедневная работа (автоматически)
+
+| Время | Событие |
+|-------|---------|
+| Каждые 5 мин | Сканирование новых Jitsi-записей |
+| **06:00** | Синхронизация из Битрикс24 (звонки, письма, комменты) |
+| 22:00 | Саммари по клиентам (Jitsi) |
+| 23:00 | Дайджест в Telegram |
+
+### Bitrix24 → Dify: именование блокнотов
+
+| Тип клиента | Название блокнота | Пример |
+|---|---|---|
+| Контакт с договором (поле ФФ-номера заполнено) | `ФФ-NNNN` | `ФФ-4405` |
+| Лид с ФФ в названии ("Иван, ФФ-4405") | `ФФ-NNNN` | `ФФ-4405` |
+| Лид без ФФ-номера | `BX-LEAD-{id}` | `BX-LEAD-12345` |
+| Контакт без договора | `BX-CONTACT-{id}` | `BX-CONTACT-789` |
+
+### RAG-чат "ФФ Ассистент куратора"
+
+Куратор пишет: **"как там ФФ-4405 поживает?"**
+→ Dify ищет в блокноте `ФФ-4405`
+→ Отвечает на основе всей истории звонков, писем и комментариев
+
+### Jitsi-созвоны
 
 1. **Проводишь созвон в Jitsi**
    - Комната: `LEAD-12345-conf` (12345 = ID клиента)
@@ -178,10 +276,6 @@ docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
    - Каждые 5 минут сканирует /recordings
    - Транскрибирует через Whisper
    - Сохраняет в базу
-
-3. **В 22:00** — индивидуальные summaries по клиентам
-
-4. **В 23:00** — дайджест в Telegram
 
 ### Telegram команды
 
@@ -234,6 +328,7 @@ python3 import_chat_to_db.py --lead-id 101 \
 ```bash
 docker compose logs orchestrator --tail 50
 docker compose logs transcribe --tail 20
+tail -100 /root/bitrix_sync.log    # Bitrix историческая синхронизация
 ```
 
 ### Перезапуск
@@ -242,7 +337,7 @@ docker compose logs transcribe --tail 20
 docker compose restart orchestrator
 ```
 
-### Сброс зависших транскрипций
+### Сброс зависших транскрипций (Jitsi)
 
 ```bash
 docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
@@ -253,6 +348,16 @@ docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
 
 1. Проверь токен: `curl https://api.telegram.org/bot{ТОКЕН}/getMe`
 2. Проверь chat_id: отправь сообщение и вызови getUpdates
+
+### Bitrix блокнот не создаётся в Dify
+
+```bash
+# Проверить ФФ-парсер
+docker exec mvp-auto-summary-orchestrator-1 python -c "
+from app.tasks.bitrix_summary import _extract_ff_number
+print(_extract_ff_number('Иван Петров, ФФ-4405'))
+"
+```
 
 ---
 
@@ -292,4 +397,4 @@ docker compose --profile legacy stop n8n
 
 ---
 
-*Обновлено: 2026-03-04 — Python orchestrator, n8n удалён из основной документации*
+*Обновлено: 2026-03-09 — добавлена Bitrix24 интеграция, ФФ-именование блокнотов, историческая синхронизация*

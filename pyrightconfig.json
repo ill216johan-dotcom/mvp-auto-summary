@@ -1,0 +1,5 @@
+{
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none",
+  "stubPath": "typings"
+}

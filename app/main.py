@@ -51,6 +51,14 @@ def main() -> None:
         recordings_dir=settings.recordings_dir,
     )
 
+    if settings.bitrix_sync_enabled:
+        log.info(
+            "bitrix_enabled",
+            webhook=settings.bitrix_webhook_url[:50] + "..." if len(settings.bitrix_webhook_url) > 50 else settings.bitrix_webhook_url,
+            sync_hour=settings.bitrix_sync_hour,
+            contract_field=settings.bitrix_contract_field or "NOT_SET",
+        )
+
     # ── Start scheduler (WF01, WF02, WF03, WF06) ─────────────
     scheduler = create_scheduler(settings, db, llm, telegram, dify)
     scheduler.start()

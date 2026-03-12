@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportMissingModuleSource=false
 """
 Transcription Server — универсальный адаптер STT.
 Переключение провайдера через ENV: STT_PROVIDER=speechkit|whisper|assemblyai
@@ -9,9 +10,8 @@ API:
   GET  /health    — статус сервиса
 """
 
-import json, os, shutil, subprocess, tempfile, time, urllib.request, threading
+import json, os, queue, shutil, subprocess, tempfile, time, urllib.request, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import psycopg2
 
 # ── Конфигурация ─────────────────────────────────────────────────────────────────────────────
 
@@ -46,6 +46,17 @@ def build_db_dsn():
 
 DB_DSN = build_db_dsn()
 
+WORKER_COUNT = int(os.getenv('TRANSCRIBE_WORKERS', '2'))
+QUEUE_SIZE = int(os.getenv('TRANSCRIBE_QUEUE_SIZE', '50'))
+WHISPER_TIMEOUT_MIN = int(os.getenv('WHISPER_TIMEOUT_MIN', '600'))
+WHISPER_TIMEOUT_MAX = int(os.getenv('WHISPER_TIMEOUT_MAX', '86400'))
+WHISPER_TIMEOUT_MULTIPLIER = float(os.getenv('WHISPER_TIMEOUT_MULTIPLIER', '4'))
+
+JOB_QUEUE: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=QUEUE_SIZE)
+JOB_LOCK = threading.Lock()
+QUEUED_JOBS: set[str] = set()
+RUNNING_JOBS: set[str] = set()
+
 
 # ── Утилиты ─────────────────────────────────────────────────────────────────────────────────
 
@@ -72,14 +83,20 @@ def resolve_filepath(filepath):
     return filepath
 
 
-def db_update(filename, status, transcript=None):
+def db_update(filename, status, transcript=None, error_message=None):
     try:
+        import psycopg2
         conn = psycopg2.connect(DB_DSN)
         cur = conn.cursor()
         if transcript is not None:
             cur.execute(
                 'UPDATE processed_files SET status=%s, transcript_text=%s WHERE filename=%s',
                 (status, transcript, filename)
+            )
+        elif error_message is not None:
+            cur.execute(
+                'UPDATE processed_files SET status=%s, error_message=%s, retry_count=retry_count+1 WHERE filename=%s',
+                (status, error_message, filename)
             )
         else:
             cur.execute(
@@ -103,6 +120,34 @@ def convert_to_ogg_chunks(filepath, tmpdir, chunk_sec=25):
         capture_output=True, timeout=60
     )
     return sorted([tmpdir + '/' + f for f in os.listdir(tmpdir) if f.startswith('c_')])
+
+
+def get_media_duration_seconds(filepath: str) -> float | None:
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                filepath,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def compute_whisper_timeout(filepath: str) -> int:
+    duration = get_media_duration_seconds(filepath)
+    if duration is None:
+        return WHISPER_TIMEOUT_MAX
+    timeout = int(duration * WHISPER_TIMEOUT_MULTIPLIER)
+    return max(WHISPER_TIMEOUT_MIN, min(timeout, WHISPER_TIMEOUT_MAX))
 
 
 # ── Провайдер: SpeechKit (Yandex) ─────────────────────────────────────────────────────────
@@ -147,9 +192,9 @@ def transcribe_whisper(filepath, filename):
     Отправляет файл на faster-whisper HTTP сервис (WHISPER_URL).
     Совместим с: faster-whisper-server, whisper.cpp server, openai-whisper-api-server.
     """
-    original_filepath = filepath
     ext = filepath.rsplit('.', 1)[-1].lower()
     tmp_audio = None
+    timeout_seconds = compute_whisper_timeout(filepath)
     
     try:
         # Если файл видео (mp4, webm) - извлекаем аудио
@@ -191,7 +236,7 @@ def transcribe_whisper(filepath, filename):
             headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
             method='POST'
         )
-        r = urllib.request.urlopen(req, timeout=7200)  # 2 hours for long files
+        r = urllib.request.urlopen(req, timeout=timeout_seconds)
         result = json.loads(r.read())
         return result.get('text', '')
     finally:
@@ -268,22 +313,50 @@ PROVIDERS = {
 }
 
 
-def transcribe_async(filepath, filename):
-    """Runs in a separate thread. Dispatches to the active STT provider."""
-    log(f'START: {filename} (provider={STT_PROVIDER})')
-    try:
-        provider_fn = PROVIDERS.get(STT_PROVIDER)
-        if not provider_fn:
-            allowed = ', '.join(PROVIDERS.keys())
-            raise RuntimeError(
-                f'Unknown STT_PROVIDER={STT_PROVIDER!r}. Allowed: {allowed}'
-            )
-        result = provider_fn(filepath, filename)
-        db_update(filename, 'completed', result)
-        log(f'DONE: {filename} -> {len(result)} chars')
-    except Exception as e:
-        log(f'ERR: {filename}: {e}')
-        db_update(filename, 'error')
+def _worker_loop(worker_id: int) -> None:
+    while True:
+        filepath, filename = JOB_QUEUE.get()
+        with JOB_LOCK:
+            QUEUED_JOBS.discard(filename)
+            RUNNING_JOBS.add(filename)
+
+        log(f'START: {filename} (provider={STT_PROVIDER})')
+        db_update(filename, 'transcribing')
+
+        try:
+            provider_fn = PROVIDERS.get(STT_PROVIDER)
+            if not provider_fn:
+                allowed = ', '.join(PROVIDERS.keys())
+                raise RuntimeError(
+                    f'Unknown STT_PROVIDER={STT_PROVIDER!r}. Allowed: {allowed}'
+                )
+            result = provider_fn(filepath, filename)
+            if result:
+                db_update(filename, 'completed', result)
+                log(f'DONE: {filename} -> {len(result)} chars')
+            else:
+                db_update(filename, 'error', error_message='empty transcript')
+                log(f'ERR: {filename}: empty transcript')
+        except Exception as e:
+            log(f'ERR: {filename}: {e}')
+            db_update(filename, 'error', error_message=str(e))
+        finally:
+            with JOB_LOCK:
+                RUNNING_JOBS.discard(filename)
+            JOB_QUEUE.task_done()
+
+
+def enqueue_job(filepath: str, filename: str) -> tuple[bool, str]:
+    with JOB_LOCK:
+        if filename in RUNNING_JOBS or filename in QUEUED_JOBS:
+            return False, 'already_queued'
+        if JOB_QUEUE.full():
+            return False, 'queue_full'
+        QUEUED_JOBS.add(filename)
+
+    db_update(filename, 'queued')
+    JOB_QUEUE.put((filepath, filename))
+    return True, 'queued'
 
 
 # ── HTTP Handler ─────────────────────────────────────────────────────────────────────────────────────
@@ -315,6 +388,7 @@ class Handler(BaseHTTPRequestHandler):
             # /check — вернуть транскрипт из БД
             if self.path == '/check':
                 filename = body.get('filename', '')
+                import psycopg2
                 conn = psycopg2.connect(DB_DSN)
                 cur = conn.cursor()
                 cur.execute('SELECT transcript_text, status FROM processed_files WHERE filename=%s', (filename,))
@@ -335,12 +409,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {'error': 'file not found', 'path': filepath})
                 return
 
-            t = threading.Thread(target=transcribe_async, args=(filepath, filename))
-            t.daemon = True
-            t.start()
+            ok, state = enqueue_job(filepath, filename)
+            if not ok and state == 'queue_full':
+                self._send(503, {'status': 'error', 'error': 'queue_full', 'filename': filename})
+                return
+            if not ok and state == 'already_queued':
+                self._send(200, {'status': 'processing', 'filename': filename, 'provider': STT_PROVIDER})
+                return
 
-            self._send(200, {'status': 'processing', 'filename': filename, 'provider': STT_PROVIDER})
-
+            self._send(202, {'status': 'queued', 'filename': filename, 'provider': STT_PROVIDER})
+            
         except Exception as e:
             log(f'HANDLER ERR: {e}')
             self._send(500, {'error': str(e)})
@@ -356,4 +434,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     log(f'TRANSCRIBE SERVER START — provider={STT_PROVIDER}, port={PORT}')
+    for i in range(WORKER_COUNT):
+        t = threading.Thread(target=_worker_loop, args=(i,), daemon=True)
+        t.start()
+        log(f'WORKER STARTED: {i+1}/{WORKER_COUNT}')
     HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()

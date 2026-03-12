@@ -1,0 +1,23 @@
+Task 4: UF_* Field Discovery
+==============================
+Status: Script created — requires running inside Docker container (network access to Bitrix)
+
+Script: scripts/bitrix_discover_fields.py
+
+Run command:
+  docker exec mvp-autosummary-app-1 python /scripts/bitrix_discover_fields.py
+
+Why not run locally: Bitrix24 API (bitrix24.ff-platform.ru) is only reachable from the
+Docker network environment. Requests from Windows dev machine timeout on large responses
+(crm.lead.fields returns ~50KB, times out at 15s).
+
+Note: The crm.lead.list basic call WAS confirmed working (returned total=30323 leads).
+The issue is specifically with large field-definition responses from Windows.
+
+NEXT STEPS:
+1. After deploying, run the discovery script inside Docker
+2. Note the BITRIX_CONTRACT_FIELD value from output
+3. Set BITRIX_CONTRACT_FIELD=UF_CRM_XXXXXXX in .env
+4. The sync_bitrix_contacts() function uses this field name automatically
+
+VERDICT: Script ready, pending Docker execution

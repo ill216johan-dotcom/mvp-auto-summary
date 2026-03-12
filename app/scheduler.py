@@ -133,6 +133,26 @@ def create_scheduler(
         max_instances=1,
     )
 
+    # ── Schedule: Bitrix24 CRM sync ───────────────────────────
+    if settings.bitrix_sync_enabled and settings.bitrix_webhook_url:
+        from app.tasks.bitrix_sync import run_bitrix_sync
+
+        scheduler.add_job(
+            lambda: run_bitrix_sync(
+                db=db,
+                llm=llm,
+                dify=dify,
+                webhook_url=settings.bitrix_webhook_url,
+                contract_field=settings.bitrix_contract_field,
+                transcribe_url=settings.transcribe_url,
+            ),
+            CronTrigger(hour=settings.bitrix_sync_hour, minute=0),
+            id="bitrix_sync",
+            name="Bitrix24: Daily CRM sync",
+            max_instances=1,
+        )
+        log.info("bitrix_sync_scheduled", hour=settings.bitrix_sync_hour)
+
     log.info(
         "scheduler_configured",
         jobs=len(scheduler.get_jobs()),
@@ -140,6 +160,7 @@ def create_scheduler(
         scan_interval=f"{settings.scan_interval_minutes}m",
         summary_at=f"{settings.individual_summary_hour}:00",
         digest_at=f"{settings.daily_digest_hour}:00",
+        bitrix_sync=settings.bitrix_sync_enabled,
     )
 
     return scheduler

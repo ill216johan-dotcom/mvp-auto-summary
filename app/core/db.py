@@ -1,3 +1,4 @@
+# pyright: reportMissingModuleSource=false
 """
 PostgreSQL database layer with connection pooling.
 
@@ -14,8 +15,6 @@ from contextlib import contextmanager
 from datetime import date
 from typing import Any
 
-import psycopg2
-from psycopg2 import pool
 
 from app.core.logger import get_logger
 
@@ -26,6 +25,8 @@ class Database:
     """Thread-safe PostgreSQL connection pool with query methods."""
 
     def __init__(self, dsn: str, min_conn: int = 2, max_conn: int = 10) -> None:
+        from psycopg2 import pool
+
         self._pool = pool.ThreadedConnectionPool(min_conn, max_conn, dsn)
         log.info("db_pool_created", min_conn=min_conn, max_conn=max_conn)
 
@@ -88,7 +89,7 @@ class Database:
                 """
                 INSERT INTO processed_files
                     (filename, filepath, lead_id, file_date, file_size_bytes, status)
-                VALUES (%s, %s, %s, %s, %s, 'transcribing')
+                VALUES (%s, %s, %s, %s, %s, 'queued')
                 ON CONFLICT (filename) DO NOTHING
                 RETURNING id
                 """,
@@ -101,13 +102,13 @@ class Database:
             return None
 
     def get_transcribing_files(self) -> list[dict[str, Any]]:
-        """Get files currently in 'transcribing' status (for polling check)."""
+        """Get files currently in queued/transcribing status (for polling check)."""
         with self.cursor() as cur:
             cur.execute(
                 """
                 SELECT id, filename, filepath, lead_id, created_at
                 FROM processed_files
-                WHERE status = 'transcribing'
+                WHERE status IN ('queued', 'transcribing')
                 ORDER BY created_at
                 """
             )
@@ -493,3 +494,512 @@ class Database:
             )
             row = cur.fetchone()
             return row[0] if row else None
+
+    # ══════════════════════════════════════════════════════════
+    # Bitrix24 CRM sync
+    # ══════════════════════════════════════════════════════════
+
+    def save_bitrix_lead(self, data: dict) -> None:
+        """Upsert a Bitrix lead/contact into bitrix_leads."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bitrix_leads
+                    (bitrix_lead_id, bitrix_entity_type, diffy_lead_id, title, name,
+                     phone, email, status_id, source_id, responsible_id, responsible_name,
+                     contract_number, last_synced_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (bitrix_lead_id) DO UPDATE SET
+                    diffy_lead_id    = EXCLUDED.diffy_lead_id,
+                    title            = EXCLUDED.title,
+                    name             = EXCLUDED.name,
+                    phone            = EXCLUDED.phone,
+                    email            = EXCLUDED.email,
+                    status_id        = EXCLUDED.status_id,
+                    responsible_id   = EXCLUDED.responsible_id,
+                    responsible_name = EXCLUDED.responsible_name,
+                    contract_number  = EXCLUDED.contract_number,
+                    last_synced_at   = NOW()
+                """,
+                (
+                    data["bitrix_lead_id"], data.get("bitrix_entity_type", "lead"),
+                    data.get("diffy_lead_id"), data.get("title"), data.get("name"),
+                    data.get("phone"), data.get("email"), data.get("status_id"),
+                    data.get("source_id"), data.get("responsible_id"),
+                    data.get("responsible_name"), data.get("contract_number"),
+                ),
+            )
+
+    def save_bitrix_call(self, data: dict) -> bool:
+        """Insert a call record. Returns True if inserted (not duplicate)."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bitrix_calls
+                    (bitrix_activity_id, bitrix_call_id, bitrix_lead_id, diffy_lead_id,
+                     direction, phone_number, call_duration, call_date,
+                     responsible_id, responsible_name, record_url, transcript_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (bitrix_activity_id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    data["bitrix_activity_id"], data.get("bitrix_call_id"),
+                    data.get("bitrix_lead_id"), data.get("diffy_lead_id"),
+                    data.get("direction"), data.get("phone_number"),
+                    data.get("call_duration"), data.get("call_date"),
+                    data.get("responsible_id"), data.get("responsible_name"),
+                    data.get("record_url"),
+                    data.get("transcript_status", "no_record"),
+                ),
+            )
+            return cur.fetchone() is not None
+
+    def save_bitrix_email(self, data: dict) -> bool:
+        """Insert an email record. Returns True if inserted."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bitrix_emails
+                    (bitrix_activity_id, bitrix_lead_id, diffy_lead_id,
+                     direction, subject, email_body, email_from, email_to,
+                     email_date, responsible_id, responsible_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (bitrix_activity_id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    data["bitrix_activity_id"], data.get("bitrix_lead_id"),
+                    data.get("diffy_lead_id"), data.get("direction"),
+                    data.get("subject"), data.get("email_body"),
+                    data.get("email_from"), data.get("email_to"),
+                    data.get("email_date"), data.get("responsible_id"),
+                    data.get("responsible_name"),
+                ),
+            )
+            return cur.fetchone() is not None
+
+    def save_bitrix_comment(self, data: dict) -> bool:
+        """Insert a timeline comment. Returns True if inserted."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bitrix_comments
+                    (bitrix_comment_id, bitrix_lead_id, diffy_lead_id,
+                     comment_text, author_id, author_name, comment_date)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (bitrix_comment_id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    data["bitrix_comment_id"], data.get("bitrix_lead_id"),
+                    data.get("diffy_lead_id"), data.get("comment_text"),
+                    data.get("author_id"), data.get("author_name"),
+                    data.get("comment_date"),
+                ),
+            )
+            return cur.fetchone() is not None
+
+    def get_bitrix_leads_for_sync(self) -> list[dict[str, Any]]:
+        """Get all synced Bitrix leads/contacts for activity sync."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT bitrix_lead_id, bitrix_entity_type, diffy_lead_id,
+                       title, name, contract_number
+                FROM bitrix_leads
+                ORDER BY bitrix_lead_id
+                """
+            )
+            return [
+                {
+                    "bitrix_lead_id": r[0], "bitrix_entity_type": r[1],
+                    "diffy_lead_id": r[2], "title": r[3], "name": r[4],
+                    "contract_number": r[5],
+                }
+                for r in cur.fetchall()
+            ]
+
+    def get_calls_pending_transcription(self) -> list[dict[str, Any]]:
+        """Get calls with record_url that haven't been transcribed yet."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, bitrix_activity_id, diffy_lead_id, record_url
+                FROM bitrix_calls
+                WHERE transcript_status = 'pending'
+                  AND record_url IS NOT NULL
+                ORDER BY call_date DESC
+                LIMIT 20
+                """
+            )
+            return [
+                {
+                    "id": r[0], "bitrix_activity_id": r[1],
+                    "diffy_lead_id": r[2], "record_url": r[3],
+                }
+                for r in cur.fetchall()
+            ]
+
+    def update_call_transcript(
+        self, call_id: int, transcript_text: str, status: str
+    ) -> None:
+        """Update transcript text and status for a call."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bitrix_calls
+                SET transcript_text = %s, transcript_status = %s
+                WHERE id = %s
+                """,
+                (transcript_text, status, call_id),
+            )
+
+    def get_bitrix_data_for_summary(
+        self, diffy_lead_id: str, target_date
+    ) -> dict[str, Any]:
+        """Get calls, emails, comments for a lead on a given date (for summary generation)."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, direction, call_duration, call_date,
+                       responsible_name, transcript_text
+                FROM bitrix_calls
+                WHERE diffy_lead_id = %s
+                  AND DATE(call_date) = %s
+                ORDER BY call_date
+                """,
+                (diffy_lead_id, target_date),
+            )
+            calls = [
+                {
+                    "id": r[0], "direction": r[1], "duration": r[2],
+                    "date": r[3], "responsible": r[4], "transcript": r[5],
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT id, direction, subject, email_body, email_from, email_to, email_date
+                FROM bitrix_emails
+                WHERE diffy_lead_id = %s
+                  AND DATE(email_date) = %s
+                ORDER BY email_date
+                """,
+                (diffy_lead_id, target_date),
+            )
+            emails = [
+                {
+                    "id": r[0], "direction": r[1], "subject": r[2],
+                    "body": r[3], "from": r[4], "to": r[5], "date": r[6],
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT id, comment_text, author_name, comment_date
+                FROM bitrix_comments
+                WHERE diffy_lead_id = %s
+                  AND DATE(comment_date) = %s
+                ORDER BY comment_date
+                """,
+                (diffy_lead_id, target_date),
+            )
+            comments = [
+                {
+                    "id": r[0], "text": r[1],
+                    "author": r[2], "date": r[3],
+                }
+                for r in cur.fetchall()
+            ]
+
+            return {"calls": calls, "emails": emails, "comments": comments}
+
+    def save_bitrix_summary(self, data: dict) -> None:
+        """Upsert a daily summary for a Bitrix lead."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bitrix_summaries
+                    (diffy_lead_id, summary_date, calls_count, emails_count,
+                     comments_count, summary_text, dify_doc_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (diffy_lead_id, summary_date) DO UPDATE SET
+                    calls_count   = EXCLUDED.calls_count,
+                    emails_count  = EXCLUDED.emails_count,
+                    comments_count = EXCLUDED.comments_count,
+                    summary_text  = EXCLUDED.summary_text,
+                    dify_doc_id   = EXCLUDED.dify_doc_id
+                """,
+                (
+                    data["diffy_lead_id"], data["summary_date"],
+                    data.get("calls_count", 0), data.get("emails_count", 0),
+                    data.get("comments_count", 0), data.get("summary_text"),
+                    data.get("dify_doc_id"),
+                ),
+            )
+
+    def start_bitrix_sync_log(self, sync_type: str = "full") -> int:
+        """Insert a sync log entry. Returns log row ID."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO bitrix_sync_log (sync_type, status)
+                VALUES (%s, 'started')
+                RETURNING id
+                """,
+                (sync_type,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def finish_bitrix_sync_log(
+        self,
+        log_id: int,
+        status: str,
+        leads_synced: int = 0,
+        calls_synced: int = 0,
+        emails_synced: int = 0,
+        comments_synced: int = 0,
+        error_message: str | None = None,
+    ) -> None:
+        """Update sync log with final counts and status."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bitrix_sync_log SET
+                    status           = %s,
+                    leads_synced     = %s,
+                    calls_synced     = %s,
+                    emails_synced    = %s,
+                    comments_synced  = %s,
+                    error_message    = %s,
+                    completed_at     = NOW()
+                WHERE id = %s
+                """,
+                (
+                    status, leads_synced, calls_synced,
+                    emails_synced, comments_synced, error_message, log_id,
+                ),
+            )
+
+    def get_bitrix_activity_dates(self, diffy_lead_id: str) -> list:
+        """
+        Return all unique dates that have ANY activity (call/email/comment)
+        for a given lead. Used for historical summary generation.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT activity_date FROM (
+                    SELECT DATE(call_date)    AS activity_date FROM bitrix_calls
+                     WHERE diffy_lead_id = %s AND call_date IS NOT NULL
+                    UNION
+                    SELECT DATE(email_date)   AS activity_date FROM bitrix_emails
+                     WHERE diffy_lead_id = %s AND email_date IS NOT NULL
+                    UNION
+                    SELECT DATE(comment_date) AS activity_date FROM bitrix_comments
+                     WHERE diffy_lead_id = %s AND comment_date IS NOT NULL
+                ) t
+                ORDER BY activity_date
+                """,
+                (diffy_lead_id, diffy_lead_id, diffy_lead_id),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    def get_bitrix_dataset_map(self) -> dict[str, str]:
+        """
+        Get diffy_lead_id → dify_dataset_id mapping from bitrix_leads table.
+        Used for Bitrix24 CRM data (NOT for Telegram chats).
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT diffy_lead_id, dify_dataset_id
+                FROM bitrix_leads
+                WHERE dify_dataset_id IS NOT NULL
+                """
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
+    def save_bitrix_dataset_mapping(self, diffy_lead_id: str, dataset_id: str) -> None:
+        """
+        Update dify_dataset_id in bitrix_leads table.
+        Used when auto-creating Dify datasets for Bitrix leads/contacts.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bitrix_leads
+                SET dify_dataset_id = %s
+                WHERE diffy_lead_id = %s
+                """,
+                (dataset_id, diffy_lead_id),
+            )
+
+    # ══════════════════════════════════════════════════════════
+    # Legacy: Telegram chat mapping (deprecated for Bitrix)
+    # ══════════════════════════════════════════════════════════
+
+    def get_telegram_dataset_map(self) -> dict[str, str]:
+        """
+        Get lead_id → dify_dataset_id mapping from lead_chat_mapping.
+        DEPRECATED for Bitrix - use get_bitrix_dataset_map() instead.
+        Kept for legacy Telegram chat support.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                "SELECT lead_id, dify_dataset_id FROM lead_chat_mapping WHERE active = true"
+            )
+            return {row[0]: row[1] for row in cur.fetchall() if row[1]}
+
+    def save_dataset_mapping(self, lead_id: str, dataset_id: str) -> None:
+        """
+        Upsert a lead_id → dify_dataset_id mapping in lead_chat_mapping.
+        DEPRECATED for Bitrix - use save_bitrix_dataset_mapping() instead.
+        Kept for legacy Telegram chat support.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO lead_chat_mapping (lead_id, dify_dataset_id, active)
+                VALUES (%s, %s, true)
+                ON CONFLICT (lead_id) DO UPDATE SET
+                    dify_dataset_id = EXCLUDED.dify_dataset_id,
+                    active          = true
+                """,
+                (lead_id, dataset_id),
+            )
+
+    # ══════════════════════════════════════════════════════════
+    # Client Registry (Unified Client Identity)
+    # ══════════════════════════════════════════════════════════
+
+    def find_dataset_for_contract(self, contract_number: str) -> str | None:
+        """
+        Find Dify dataset ID by contract number (e.g., 'ФФ-4405').
+        Used by Jitsi/Telegram workflows to add data to existing Bitrix datasets.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT dify_dataset_id
+                FROM client_registry
+                WHERE %s = ANY(contract_numbers)
+                  OR active_contract = %s
+                LIMIT 1
+                """,
+                (contract_number, contract_number),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def find_dataset_by_name(self, legal_name: str) -> str | None:
+        """
+        Find Dify dataset ID by legal name (fuzzy match).
+        Used for cross-referencing clients by company name.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT dify_dataset_id
+                FROM client_registry
+                WHERE legal_name ILIKE %s
+                LIMIT 1
+                """,
+                (f"%{legal_name}%",),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def get_client_info(self, diffy_lead_id: str) -> dict[str, Any] | None:
+        """
+        Get complete client information from registry.
+        Returns all known IDs, contracts, contact info, and Dify dataset.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id, bitrix_lead_id, bitrix_contact_id, diffy_lead_id,
+                    telegram_lead_id, legacy_lead_id,
+                    legal_name, contract_numbers, active_contract,
+                    phone, email, dify_dataset_id,
+                    source_system, data_quality, notes
+                FROM client_registry
+                WHERE diffy_lead_id = %s
+                """,
+                (diffy_lead_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            return {
+                "id": row[0],
+                "bitrix_lead_id": row[1],
+                "bitrix_contact_id": row[2],
+                "diffy_lead_id": row[3],
+                "telegram_lead_id": row[4],
+                "legacy_lead_id": row[5],
+                "legal_name": row[6],
+                "contract_numbers": row[7],
+                "active_contract": row[8],
+                "phone": row[9],
+                "email": row[10],
+                "dify_dataset_id": row[11],
+                "source_system": row[12],
+                "data_quality": row[13],
+                "notes": row[14],
+            }
+
+    def link_telegram_to_client(self, telegram_lead_id: int, diffy_lead_id: str) -> bool:
+        """
+        Link Telegram lead ID to Bitrix client in registry.
+        Used when Telegram chat data needs to be added to existing Bitrix dataset.
+        """
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE client_registry
+                SET telegram_lead_id = %s, updated_at = NOW()
+                WHERE diffy_lead_id = %s
+                """,
+                (str(telegram_lead_id), diffy_lead_id),
+            )
+            return cur.rowcount > 0
+
+    def get_or_create_dataset_for_recording(self, lead_id: str, dify) -> str | None:
+        """
+        Find existing Dify dataset or create new one for Jitsi recording.
+        Priority:
+        1. Match by contract number (extracted from lead_id)
+        2. Match by legal name (from processed_files metadata)
+        3. Create new dataset
+
+        Returns dataset_id or None on failure.
+        """
+        # Try contract number match
+        import re
+        contract_match = re.search(r'ФФ-(\d+)', lead_id, re.IGNORECASE)
+        if contract_match:
+            contract = f'ФФ-{contract_match.group(1)}'
+            dataset_id = self.find_dataset_for_contract(contract)
+            if dataset_id:
+                log.info("dataset_found_by_contract", lead_id=lead_id, contract=contract, dataset_id=dataset_id)
+                return dataset_id
+
+        # Try legal name match (would need name lookup)
+        # For now, create new dataset
+        try:
+            dataset_id = dify.create_dataset(lead_id)
+            if dataset_id:
+                log.info("dataset_created_for_recording", lead_id=lead_id, dataset_id=dataset_id)
+                return dataset_id
+        except Exception as e:
+            log.warning("dataset_create_failed", lead_id=lead_id, error=str(e))
+
+        return None
+

@@ -1,0 +1,15 @@
+Total new Bitrix methods: 11
+  - save_bitrix_lead
+  - save_bitrix_call
+  - save_bitrix_email
+  - save_bitrix_comment
+  - get_bitrix_leads_for_sync
+  - get_calls_pending_transcription
+  - update_call_transcript
+  - get_bitrix_data_for_summary
+  - save_bitrix_summary
+  - start_bitrix_sync_log
+  - finish_bitrix_sync_log
+
+Syntax: OK
+Total lines: 786

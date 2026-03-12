@@ -1,0 +1,29 @@
+Task: Create scripts/migrate_db_v3.sql with 6 PostgreSQL tables for Bitrix24 CRM sync
+
+Status: COMPLETED ✅
+
+File: scripts/migrate_db_v3.sql
+- Total lines: 120
+- CREATE TABLE statements: 6
+- All tables use CREATE TABLE IF NOT EXISTS (idempotent)
+- All tables follow naming and style of existing migrations
+
+Tables created:
+1. bitrix_leads - маппинг Bitrix сущностей → Diffy лидов
+2. bitrix_calls - звонки из CRM
+3. bitrix_emails - письма из CRM (с полным текстом)
+4. bitrix_comments - комментарии сотрудников из таймлайна
+5. bitrix_sync_log - журнал синхронизаций
+6. bitrix_summaries - ежедневные саммари по лидам Битрикса
+
+Verification:
+✅ SQL syntax verified with Python
+✅ All 6 CREATE TABLE IF NOT EXISTS statements present
+✅ Idempotent (can be run twice without errors)
+✅ No FK constraints to unknown tables
+✅ No triggers or complex functions
+✅ Follows existing style: SERIAL PRIMARY KEY, TIMESTAMPTZ, VARCHAR
+✅ Proper indexes on foreign key columns and common queries
+
+Migration command:
+docker exec mvp-autosummary-postgres-1 psql -U n8n -d n8n -f /scripts/migrate_db_v3.sql

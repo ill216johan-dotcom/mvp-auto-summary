@@ -33,3 +33,6 @@ desktop.ini
 *.pem
 *.key
 credentials.json
+
+# Sensitive credentials
+docs/CREDENTIALS.md

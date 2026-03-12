@@ -1,0 +1,35 @@
+TASK: Add run_bitrix_sync() orchestration function to app/tasks/bitrix_sync.py, then wire it into app/scheduler.py and app/main.py.
+
+VERIFICATION RESULTS:
+====================
+
+✓ Step 1: run_bitrix_sync() appended to app/tasks/bitrix_sync.py
+  - Function signature: run_bitrix_sync(db, llm, dify, webhook_url, contract_field, transcribe_url) -> dict
+  - Orchestration steps: leads → contacts → calls → emails → comments → transcribe → summarize
+  - Error handling: Each step logs errors and continues on failure
+  - Stats tracking: Returns dict with counts and error list
+
+✓ Step 2: app/scheduler.py updated
+  - Bitrix job registered conditionally on BITRIX_SYNC_ENABLED
+  - CronTrigger at settings.bitrix_sync_hour:00
+  - Lambda captures db, llm, dify, settings from create_scheduler scope
+  - Log entry added to scheduler_configured with bitrix_sync=settings.bitrix_sync_enabled
+
+✓ Step 3: app/main.py updated
+  - Bitrix initialization logging added after services_initialized
+  - Logs webhook URL (truncated to 50 chars), sync_hour, contract_field
+  - Conditional on settings.bitrix_sync_enabled
+
+✓ Step 4: All imports verified
+  - from app.tasks.bitrix_sync import run_bitrix_sync → OK
+  - from app.scheduler import create_scheduler → OK
+  - from app.main import main → OK
+
+✓ Step 5: LSP diagnostics
+  - app/scheduler.py: No errors
+  - app/main.py: No errors
+  - app/tasks/bitrix_sync.py: Type hint warnings only (dict/list generic args) - not blocking
+
+SUMMARY:
+========
+All required changes implemented successfully. The orchestration function is wired into the scheduler and main entry point. Conditional initialization ensures Bitrix24 sync only runs when BITRIX_SYNC_ENABLED=true.

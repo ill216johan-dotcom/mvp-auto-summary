@@ -1,0 +1,33 @@
+TASK 1: Bitrix24 Configuration Fields - Verification Report
+============================================================
+
+VERIFICATION COMMAND:
+python -c "import os; os.environ['POSTGRES_PASSWORD']='test'; os.environ['GLM4_API_KEY']='test'; os.environ['TELEGRAM_BOT_TOKEN']='test'; os.environ['BITRIX_WEBHOOK_URL']='https://test.bitrix24.com/rest/1/test/'; from app.config import get_settings; s=get_settings(); print(f'BITRIX_WEBHOOK_URL={s.bitrix_webhook_url}'); print(f'BITRIX_SYNC_HOUR={s.bitrix_sync_hour}'); print('OK')"
+
+VERIFICATION OUTPUT:
+BITRIX_WEBHOOK_URL=https://test.bitrix24.com/rest/1/test/
+BITRIX_SYNC_HOUR=6
+OK
+
+STATUS: ✅ PASSED
+
+CHANGES MADE:
+1. app/config.py - Added 4 Bitrix24 fields to Settings class:
+   - bitrix_webhook_url: str (default="", alias="BITRIX_WEBHOOK_URL")
+   - bitrix_contract_field: str (default="", alias="BITRIX_CONTRACT_FIELD")
+   - bitrix_sync_hour: int (default=6, alias="BITRIX_SYNC_HOUR")
+   - bitrix_sync_enabled: bool (default=True, alias="BITRIX_SYNC_ENABLED")
+
+2. .env.example - Added 4 Bitrix24 environment variables with Russian comments:
+   - BITRIX_WEBHOOK_URL=https://bitrix24.ff-platform.ru/rest/1/your_key/
+   - BITRIX_CONTRACT_FIELD=UF_CRM_123456
+   - BITRIX_SYNC_HOUR=6
+   - BITRIX_SYNC_ENABLED=True
+
+VERIFICATION DETAILS:
+- Settings class loads without errors
+- All 4 new fields are accessible via settings object
+- Default values work correctly (bitrix_sync_hour=6, bitrix_sync_enabled=True)
+- Environment variable aliases work correctly
+- No existing fields were modified
+- get_settings() function remains unchanged

@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     deadline_extractor_minute: int = Field(default=30)
     daily_digest_hour: int = Field(default=23)          # WF02
 
+    # ── Bitrix24 CRM ──────────────────────────────────────────
+    bitrix_webhook_url: str = Field(default="", alias="BITRIX_WEBHOOK_URL")
+    bitrix_contract_field: str = Field(default="", alias="BITRIX_CONTRACT_FIELD")
+    bitrix_sync_hour: int = Field(default=22, alias="BITRIX_SYNC_HOUR")
+    bitrix_sync_enabled: bool = Field(default=True, alias="BITRIX_SYNC_ENABLED")
 
 def get_settings() -> Settings:
     """Create and return settings instance (cached at module level)."""
