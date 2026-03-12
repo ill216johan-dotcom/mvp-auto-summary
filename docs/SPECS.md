@@ -1,451 +1,773 @@
-# MVP Auto-Summary: Архитектура и Спецификации
+# MVP Auto-Summary: Architecture & Specifications
 
-> **Версия:** 4.2 | **Дата:** 2026-03-12
-> **Статус:** Рабочая система — Phase 1 (Bitrix24 интеграция) завершена, **ИСПРАВЛЕН критический баг маппинга датасетов**
-> **Сервер:** `root@84.252.100.93` (Ubuntu 22.04, 2 vCPU / 8 GB RAM)
-
----
-
-## 1. Что делает система
-
-Автоматическая система суммаризации и RAG-доступа к истории коммуникаций с клиентами фулфилмент-компании.
-
-**Два канала коммуникаций:**
-
-| Канал | Источник | Обработка |
-|-------|---------|-----------|
-| **Jitsi-звонки** | Jibri → NFS `/mnt/recordings` | Whisper → транскрипт → Claude summary → Dify |
-| **Bitrix24 CRM** | REST API (лиды, контакты, звонки, письма, комментарии) | PostgreSQL → Claude summary → Dify |
-
-**Итог для пользователя:** RAG-чат "ФФ Ассистент куратора" в Dify. Куратор пишет в свободной форме — "как там ФФ-4405?" — система ищет в блокноте клиента и отвечает по фактам.
+> **Version:** 1.0 | **Date:** 2026-02-18  
+> **Status:** Phase 0 — MVP  
+> **Strategy:** Buy over Build — no custom backend
 
 ---
 
-## 2. Архитектура
+## 1. Overview
+
+System for automatic meeting transcription and summarization at a fulfillment company.
+
+**What it does (Phase 0):**
+1. Manager conducts a call in Jitsi (room name: `LEAD-{ID}-conf`)
+2. Jibri records the meeting → file lands on NFS server
+3. n8n detects new file → sends audio directly to Whisper (self-hosted)
+4. Whisper returns transcript → saved to open-notebook + metadata in PostgreSQL
+5. Daily at 23:00: n8n collects all transcripts → GLM-4 summarizes → Telegram digest
+
+---
+
+## 2. Architecture Diagram
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │           VPS root@84.252.100.93                 │
-                    │              Ubuntu 22.04                         │
-                    │         2 vCPU / 8 GB RAM / 40 GB SSD            │
+                    │                VPS (Ubuntu 22.04)                │
+                    │                2 vCPU / 8 GB RAM                 │
                     │                                                  │
                     │  ┌─────────────────────────────────────────────┐ │
                     │  │            docker-compose                   │ │
                     │  │                                             │ │
-                    │  │  ┌──────────────────────┐                  │ │
-                    │  │  │   orchestrator       │                  │ │
-                    │  │  │   (Python + APSched) │                  │ │
-                    │  │  │   + Telegram Bot     │                  │ │
-                    │  │  └──────────┬───────────┘                  │ │
-                    │  │             │                               │ │
-                    │  │  ┌──────────┴───────────┐                  │ │
-                    │  │  │      PostgreSQL       │                  │ │
-                    │  │  │       :5432           │                  │ │
-                    │  │  │   DB: n8n, user: n8n  │                  │ │
-                    │  │  └──────────────────────┘                  │ │
+                    │  │  ┌──────────┐  ┌──────────────┐           │ │
+                    │  │  │   n8n    │  │ open-notebook │           │ │
+                    │  │  │  :5678   │  │    :8888      │           │ │
+                    │  │  └────┬─────┘  └──────┬───────┘           │ │
+                    │  │       │               │                    │ │
+                    │  │  ┌────┴───────────────┴────┐              │ │
+                    │  │  │      PostgreSQL          │              │ │
+                    │  │  │       :5432              │              │ │
+                    │  │  │  (n8n metadata store)    │              │ │
+                    │  │  └─────────────────────────┘              │ │
                     │  │                                             │ │
-                    │  │  ┌──────────────────────┐                  │ │
-                    │  │  │   transcribe         │                  │ │
-                    │  │  │   (STT adapter :9001)│                  │ │
-                    │  │  └──────────┬───────────┘                  │ │
-                    │  │             │                               │ │
-                    │  │  ┌──────────┴───────────┐                  │ │
-                    │  │  │   Whisper (CPU)      │                  │ │
-                    │  │  │   :8000 (profile)    │                  │ │
-                    │  │  └──────────────────────┘                  │ │
-                    │  │                                             │ │
-                    │  │  ┌──────────────────────┐                  │ │
-                    │  │  │  summaries-nginx     │                  │ │
-                    │  │  │  :8181               │                  │ │
-                    │  │  └──────────────────────┘                  │ │
+                    │  │  ┌─────────────────────────┐              │ │
+                    │  │  │      SurrealDB           │              │ │
+                    │  │  │       :8000              │              │ │
+                    │  │  │  (open-notebook data)    │              │ │
+                    │  │  └─────────────────────────┘              │ │
                     │  └─────────────────────────────────────────────┘ │
                     │                                                  │
-                    │  ┌────────────────┐  ┌────────────────────────┐ │
-                    │  │ /mnt/recordings│  │ Dify (self-hosted)     │ │
-                    │  │ NFS mount (ro) │  │ http://84.252.100.93   │ │
-                    │  └────────────────┘  │ https://dify-ff.duck.. │ │
-                    │                      └────────────────────────┘ │
+                    │  ┌────────────────┐                              │
+                    │  │ /mnt/recordings│ ← NFS mount (read-only)     │
+                    │  └────────────────┘                              │
                     └──────────────────────────────────────────────────┘
-                              │                       │
-                    ┌─────────▼─────────┐   ┌────────▼────────────┐
-                    │  Claude (z.ai)    │   │  Bitrix24 CRM       │
-                    │  Anthropic API    │   │  bitrix24.ff-plat.. │
-                    │  claude-3-5-haiku │   │  Webhook REST API   │
-                    └───────────────────┘   └─────────────────────┘
+                              │                    │
+                    ┌─────────▼─────────┐  ┌──────▼──────────┐
+                    │  Whisper (local)  │  │  ZhipuAI (GLM)  │
+                    │  - STT API        │  │  - GLM-4-FlashX │
+                    │  - Container      │  │  :5678 HTTP     │
+                    └───────────────────┘  └─────────────────┘
                               │
                     ┌─────────▼─────────┐
                     │  Telegram Bot API  │
-                    │  @ffp_report_bot   │
+                    │  - Daily digest    │
                     └───────────────────┘
 ```
 
 ---
 
-## 3. Ключевые архитектурные решения
+## 3. Key Architectural Decisions
 
-### 3.1 Python Orchestrator вместо n8n (завершено 2026-03-04)
+### 3.1. open-notebook = YES (with caveats)
 
-Полная замена n8n на Python. Причины:
+**Verdict: Подходит для MVP.**
 
-| Проблема n8n | Решение Python |
-|---|---|
-| Workflow JSON — чёрный ящик | Код в git, читаемый Python |
-| WF03 сломан (неправильный Anthropic API) | Единый LLMClient |
-| Нет нормального retry/backoff | tenacity library |
-| ~500MB RAM overhead | ~50MB RAM |
-| JS + Python = 2 кодовые базы | Единый Python |
+Исследование показало, что open-notebook (lfnovo/open-notebook) имеет **полноценный REST API**:
 
-**Структура проекта:**
-```
-app/
-├── main.py                    # Entry point
-├── config.py                  # Pydantic Settings (env vars)
-├── scheduler.py               # APScheduler (6 jobs)
-├── integrations/
-│   └── bitrix24.py            # Bitrix24 REST API client
-├── core/
-│   ├── db.py                  # PostgreSQL (800+ строк, Jitsi + Bitrix методы)
-│   ├── llm.py                 # Claude API (Anthropic format)
-│   ├── dify_api.py            # Dify KB API (create_dataset + create_document)
-│   ├── telegram_api.py        # Telegram Bot API
-│   └── logger.py              # Structlog
-├── tasks/
-│   ├── scan_recordings.py     # WF01: сканирование /recordings
-│   ├── individual_summary.py  # WF03: саммари по Jitsi-звонкам
-│   ├── deadline_extractor.py  # WF06: задачи и дедлайны
-│   ├── daily_digest.py        # WF02: дайджест в Telegram
-│   ├── bitrix_sync.py         # Bitrix: лиды/звонки/письма/комментарии
-│   └── bitrix_summary.py      # Bitrix: Claude-саммари + Whisper + Dify
-└── bot/
-    └── handler.py             # WF04: Telegram бот команды
-```
+| Возможность | Поддержка | Endpoint |
+|-------------|-----------|----------|
+| Создание блокнотов | YES | `POST /notebooks` |
+| Добавление источников (текст, файл, URL) | YES | `POST /sources` |
+| Привязка к нескольким блокнотам | YES | `POST /notebooks/{id}/sources/{id}` |
+| RAG-чат по блокноту | YES | `POST /chat/execute` |
+| Векторный поиск | YES | `POST /search` |
+| Auto-RAG (поиск + синтез) | YES | `POST /search/ask` |
 
-### 3.2 Whisper self-hosted (STT)
+**LLM-бэкенды**: 16+ провайдеров. GLM-4 через Ollama (локально) или OpenRouter (облако).
 
-Self-hosted вместо Yandex SpeechKit (~25K руб/мес → 0 руб/мес).
+**БД**: SurrealDB (граф + вектор + полнотекст).
 
-- **Container**: `fedirz/faster-whisper-server:latest-cpu`
-- **Port**: 8000 (внутри docker)
-- **Model**: medium (3GB RAM, ~40 мин на 60 мин аудио)
-- **API**: `POST http://whisper:8000/v1/audio/transcriptions`
-- **Используется для**: Jitsi-записей (через transcribe сервис) + Bitrix voximplant-записей (прямо из bitrix_summary.py)
+**Критические ограничения:**
+- Нет фильтрации по дате в API → фильтровать в n8n
+- Нет bulk-операций → последовательные вызовы
+- Аутентификация только по паролю → нужен reverse proxy для prod
+- Контекст для чата строится на фронтенде → в n8n строить вручную
 
-### 3.3 LLM: Claude 3.5 Haiku (z.ai)
+### 3.2. File Watcher: Cron Scan вместо LocalFileTrigger
 
-- **Endpoint**: `https://api.z.ai/api/anthropic/v1/messages`
-- **Format**: Anthropic Messages API (НЕ OpenAI-compatible!)
-- **Auth**: `x-api-key` + `anthropic-version: 2023-06-01`
-- **Env-переменные**: `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` (в коде); в `.env` называются `GLM4_API_KEY` и т.д. — исторически
+**Проблема**: `LocalFileTrigger` отключён по умолчанию в n8n 2.0. Даже если включить — `inotify` НЕ работает с NFS (файлы, созданные удалённой машиной, не генерируют события).
 
-### 3.4 Dify.ai для RAG
-
-**Концепция**: Один RAG-чат для всех клиентов. Один блокнот (dataset) на клиента.
-
-| Тип клиента | Имя блокнота | Пример |
-|---|---|---|
-| Контакт Bitrix с договором ФФ-NNNN | **ФФ-4405** | Извлекается из поля `title` |
-| Лид Bitrix (продажники) | BX-LEAD-1035 | Технический |
-| Клиент Jitsi (старая схема) | LEAD-42 | Через lead_chat_mapping |
-
-**Важно**: "ФФ Ассистент куратора" — единый чат. Куратор пишет в свободной форме ("как там ФФ-4405?"), Dify ищет в нужном блокноте. Отдельный чат на каждого клиента не нужен.
-
-**Каждый документ в блокноте начинается с шапки:**
-```markdown
-# Клиент: ФФ-4405
-# Номер договора: ФФ-4405
-```
-Это гарантирует что RAG находит клиента даже по частичному упоминанию.
-
-### 3.5 Bitrix24 CRM — двойная архитектура ID
+**Решение**: Schedule Trigger (каждые 5 минут) + сканирование папки + отслеживание обработанных файлов в PostgreSQL.
 
 ```
-Bitrix Lead   (crm.lead.list):
-  если в title есть ФФ-номер   → diffy_lead_id = "ФФ-{num}" (regex: [ФфFf][ФфFf]-?(\d+))
-  иначе                      → diffy_lead_id = "BX-LEAD-{lead_id}"
-
-Bitrix Contact (crm.contact.list):
-  если в title есть ФФ-номер   → diffy_lead_id = "ФФ-{num}"
-  иначе                      → diffy_lead_id = "BX-CONTACT-{id}"
+[Schedule: */5 * * * *]
+    → Read /mnt/recordings/**/*.{webm,mp3}
+    → Filter: NOT IN processed_files (PostgreSQL)
+    → For each new file:
+        → Convert WebM → MP3 (ffmpeg)
+        → Upload to Yandex S3
+        → Start SpeechKit async
+        → Mark as "processing" in DB
 ```
 
-**Поле договора** — `UF_CRM_1632960743049`, формат значения: `ФФ-18`, `ФФ-4405`.
-Подтверждено через `scripts/bitrix_discover_fields.py`.
+### 3.3. Whisper вместо Yandex SpeechKit (ИЗМЕНЕНИЕ v1.1)
 
-**ФФ-номер из title:** Многие лиды не имеют заполненного поля договора, но в `TITLE` прописано "Иван, ФФ-4405". Функция `_extract_ff_number(title)` в `bitrix_summary.py` извлекает номер регулярным выражением `[ФфFf][ФфFf]-?(\d+)`.
+**Решение**: Заменили Yandex SpeechKit (25K руб/мес) на self-hosted Whisper (0 руб/мес).
+
+**Почему Whisper лучше для этого MVP:**
+
+| Критерий | Yandex SpeechKit | Whisper (self-hosted) |
+|----------|------------------|----------------------|
+| Стоимость | ~25,000 руб/мес | **0 руб** |
+| Формат WebM | ❌ Не поддерживает | ✅ Нативно |
+| Конвертация | Нужна (WebM→MP3) | **Не нужна** |
+| S3 upload | Обязателен | **Не нужен** |
+| Polling | Асинхронный (сложно) | **Синхронный (просто)** |
+| Приватность | Данные уходят в облако | **Всё локально** |
+| Качество RU | Отличное | Очень хорошее (medium) |
+| Зависимости | API key + S3 + folder_id | **Ничего** |
+
+**Docker**: `onerahmet/openai-whisper-asr-webservice:latest-cpu`  
+**Engine**: faster-whisper (CTranslate2 — в 4x быстрее оригинального Whisper)  
+**API**: `POST http://whisper:9000/asr?task=transcribe&language=ru&output=json`
+
+**Модели и ресурсы:**
+
+| Модель | RAM | Скорость (60 мин) | WER русский |
+|--------|-----|-------------------|-------------|
+| tiny | +1 GB | ~5 мин | ~15% |
+| base | +1 GB | ~10 мин | ~10% |
+| small | +2 GB | ~20 мин | ~7% |
+| **medium** | **+3 GB** | **~40 мин** | **~5%** |
+| large-v3 | +5 GB | ~90 мин | ~3% |
+
+**Рекомендация**: модель `medium` — баланс качества и скорости. VPS нужен 8 GB RAM.
+
+**Простой flow (без конвертации, без S3, без polling):**
+1. n8n отправляет WebM файл напрямую в Whisper
+2. Whisper возвращает текст синхронно
+3. Готово
+
+Это **радикальное упрощение** по сравнению с SpeechKit (убраны 4 шага).
+
+### 3.4. GLM-4: Выбор модели
+
+| Модель | Контекст | Цена (input/output за 1M tok) | Рекомендация |
+|--------|----------|-------------------------------|--------------|
+| GLM-4.7-Flash | 200K | **БЕСПЛАТНО** | Для тестирования |
+| GLM-4.7-FlashX | 200K | $0.07 / $0.40 | **MVP (production)** |
+| GLM-4.7 | 200K | $0.60 / $2.20 | Максимальное качество |
+
+**API endpoint**: `https://api.z.ai/api/paas/v4/chat/completions`  
+**Совместимость**: OpenAI-compatible → можно использовать OpenAI-ноду n8n.
+
+**Рекомендация**: GLM-4.7-FlashX для MVP (~$0.005 за суммари одного митинга).
+
+### 3.5. Нет кастомного бэкенда
+
+MVP работает без единой строчки серверного кода:
+- **n8n** = автоматизация (workflows)
+- **open-notebook** = хранение + RAG + UI
+- **PostgreSQL** = метаданные n8n + трекинг обработанных файлов
+- **ffmpeg** = конвертация (вызов через n8n Execute Command)
+
+Единственный "код" — JavaScript-сниппеты внутри n8n Code nodes.
 
 ---
 
-## 4. Расписание задач
+## 4. Component Responsibilities
 
-| ID | Время (MSK) | Задача | Файл |
-|----|-------------|--------|------|
-| WF01 | каждые 5 мин | Скан `/recordings` → транскрипция | `scan_recordings.py` |
-| WF03 | 22:00 | Per-client summaries (Jitsi) | `individual_summary.py` |
-| WF06 | 22:30 | Задачи и дедлайны из транскриптов | `deadline_extractor.py` |
-| WF02 | 23:00 | Дайджест → Telegram | `daily_digest.py` |
-| **BITRIX** | **06:00** | **Bitrix24 CRM полный синк** | `bitrix_sync.py` + `bitrix_summary.py` |
-| WF04 | по запросу | Telegram бот команды | `bot/handler.py` |
-
-**Текущий статус:** `jobs=6` в scheduler — подтверждено в логах.
+| Компонент | Роль | Порт | Данные |
+|-----------|------|------|--------|
+| **n8n** | Оркестрация всех workflow | 5678 | Метаданные в PostgreSQL |
+| **open-notebook** | Хранение транскриптов, RAG, UI для кураторов | 8888 | SurrealDB |
+| **PostgreSQL** | n8n persistence + processed files tracker | 5432 | Volumes |
+| **SurrealDB** | БД open-notebook (граф + вектор) | 8000 | Volumes |
+| **Whisper (self-hosted)** | STT (Speech-to-Text) | 9000 | Local |
+| **GLM-4 (ZhipuAI)** | Суммаризация транскриптов | External API | — |
+| **Telegram Bot** | Отправка дайджестов | External API | — |
 
 ---
 
-## 5. База данных
+## 5. Data Flow
 
-### Jitsi-таблицы (оригинальные)
+### Workflow 1: New Recording → Transcription (каждые 5 мин)
+
+```
+┌──────────────────┐
+│ Schedule Trigger  │ ← Каждые 5 минут
+│   */5 * * * *     │
+└────────┬─────────┘
+         │
+┌────────▼─────────┐
+│ Scan /recordings  │ ← find + sort by mtime (новые первые)
+│ *.webm, *.mp3     │   максимум 50 файлов за раз
+└────────┬─────────┘
+         │
+┌────────▼──────────────────┐
+│ Parse LEAD_ID              │ ← Regex: /^(\d+)_/
+│ from filename              │
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ Check PostgreSQL           │ ← COUNT(*) processed_files
+│ Is New File?               │   count=0 → новый
+└────────┬──────────────────┘
+         │ (только новые)
+         │
+┌────────▼──────────────────┐
+│ Mark as Transcribing       │ ← INSERT status='transcribing'
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ Read Binary File           │ ← Загрузка файла в память
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ Whisper Transcribe         │ ← POST /asr (multipart)
+└────────┬──────────────────┘
+         │
+    ┌────┴────┐
+    │ Has     │
+    │Transcript│
+    └────┬────┘
+    yes  │  no
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌───────┐ ┌───────┐
+│Extract│ │ Error │
+│ Text  │ │ Mark  │
+└───┬───┘ └───────┘
+    │
+┌────▼──────────────────────┐
+│ Get/Create Notebook       │ ← open-notebook API
+│ Save Transcript           │   с обработкой ошибок
+└────────┬──────────────────┘
+         │
+    ┌────┴────┐
+    │ Save    │
+    │ Success?│
+    └────┬────┘
+    yes  │  no
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌───────┐ ┌───────┐
+│ Mark  │ │ Error │
+│ Compl │ │ Mark  │
+└───────┘ └───────┘
+```
+
+*Workflow 1.5 (polling SpeechKit) УДАЛЁН — с Whisper транскрипция синхронная, polling не нужен.*
+
+### Workflow 2: Daily Digest (23:00)
+
+```
+┌──────────────────┐
+│ Schedule Trigger  │ ← Каждый день в 23:00
+│   0 23 * * *      │
+└────────┬─────────┘
+         │
+┌────────▼──────────────────┐
+│ SELECT v_today_completed   │ ← summary_sent=false
+│ from PostgreSQL            │    AND status = 'completed'
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ Aggregate transcripts      │ ← Code node
+│ (max 50K chars, truncate)  │   защита от переполнения
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ GLM-4.7-FlashX summarize   │ ← POST /chat/completions
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ Send Telegram digest       │ ← POST /sendMessage
+│ (chunks max 3500 chars)    │   разбиение на части
+└────────┬──────────────────┘
+         │
+┌────────▼──────────────────┐
+│ Update processed_files     │ ← summary_sent=true
+└──────────────────────────┘
+```
+
+---
+
+## 6. Risk Analysis
+
+### RED (Critical)
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| **Whisper OOM / model too heavy** | Pipeline stops | Use smaller model (small/medium) or upgrade RAM |
+| **NFS mount drops** | No new recordings detected | Health check workflow; alert to Telegram |
+| **Whisper timeout on long files** | Transcriptions queue up | Increase HTTP timeout; split long files |
+| **open-notebook API changes** | Integration breaks | Pin Docker image version; test before upgrade |
+
+### YELLOW (Medium)
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Whisper processing backlog (slow CPU) | Digest delay | Use smaller model; schedule off-peak; scale VPS |
+| GLM-4 API instability (China-hosted) | Digest delay | Retry logic; fallback to GLM-4.7-Flash (free) |
+| open-notebook SurrealDB data loss | Loss of transcripts | Daily DB backup script; keep original files |
+| Duplicate processing | Double transcription costs | Idempotency via PostgreSQL processed_files table |
+
+### GREEN (Low)
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Manager forgets LEAD-{ID} naming | File not processed | Alert on "unknown" files; manual reprocessing |
+| Telegram bot rate limit | Digest delayed | Single message per day is well under limit |
+
+---
+
+## 7. Migration Path (Phase 0 → Full Vision)
+
+**Phase 0 does NOT paint into a corner** because:
+
+1. **open-notebook supports RAG** → Phase 4 (RAG-чат по клиенту) available immediately
+2. **PostgreSQL already present** → Phase 1 (Telegram history) can store data here
+3. **n8n is extensible** → Phase 2 (Bitrix24) = new workflow + HTTP nodes
+4. **LEAD-{ID} is the universal key** → all phases use the same client identifier
+5. **open-notebook multi-notebook** → each client = 1 notebook, all sources linked
+
+### Phase Roadmap
+
+| Phase | Scope | New Components | Effort |
+|-------|-------|----------------|--------|
+| **0** (current) | Meetings → Transcription → Digest | n8n, open-notebook, Whisper, GLM-4, Telegram | 1-2 weeks |
+| **1** | Telegram chat history import | Telegram Bot (webhook) + n8n | 1 week |
+| **2** | Bitrix24 call/email summaries | n8n HTTP → Bitrix API | 1 week |
+| **3** | Unified client profile | open-notebook notebooks as profiles | 1 week |
+| **4** | RAG chat per client | open-notebook /chat/execute | Already built-in |
+| **5** | WMS integration + alerts | n8n HTTP → WMS API, alert workflow | 2 weeks |
+| **6** | Churn risk detection | GLM-4 analysis workflow, scoring | 2 weeks |
+
+---
+
+## 8. Project Structure
+
+```
+mvp-auto-summary/
+├── docker-compose.yml          # Infrastructure: n8n + open-notebook + DBs
+├── .env.example                # Environment variables template
+├── .gitignore                  # Exclude .env, volumes, temp files
+│
+├── docs/
+│   ├── SPECS.md                # This file — architecture & decisions
+│   ├── API.md                  # API contracts (external services)
+│   └── ERRORS.md               # Known errors & troubleshooting
+│
+├── n8n-workflows/
+│   ├── 01-new-recording.json       # Workflow 1: Scan → Whisper → open-notebook
+│   └── 02-daily-digest.json        # Workflow 2: Summarize → Telegram
+│
+├── scripts/
+│   ├── convert-audio.sh        # ffmpeg WebM → MP3 conversion
+│   ├── test-connections.sh     # Verify all APIs are reachable
+│   ├── backup-db.sh            # Daily database backup
+│   └── simulate-recording.sh   # Drop test file for workflow testing
+│
+├── MVP_PHASE0_TZ.md            # Original requirements doc
+└── от_руководства.txt           # Original management instructions
+```
+
+---
+
+## 9. Cost Estimate (Monthly) — UPDATED v1.1
+
+| Component | Cost | Notes |
+|-----------|------|-------|
+| VPS (2 vCPU, 8 GB RAM) | ~2,500 RUB | Ubuntu 22.04 |
+| Whisper (self-hosted) | **0 RUB** | Бесплатно, работает на VPS |
+| GLM-4.7-FlashX API | ~300 RUB | ~$0.005 per summary |
+| **TOTAL** | **~2,800 RUB/month** | |
+
+> **Экономия 90%** по сравнению с первоначальным планом (27,500 → 2,800 руб).
+
+---
+
+## 10. Changes to Original TZ
+
+### Added (not in original TZ)
+
+1. **Self-hosted Whisper** — заменяет Yandex SpeechKit, экономит 25K руб/мес
+2. **PostgreSQL tracker** — Idempotency: track processed files to avoid double transcription
+3. **Cron scan instead of file watcher** — NFS + inotify = broken; polling is reliable
+
+### Changed (v1.1 — Whisper update)
+
+1. **STT engine**: Yandex SpeechKit → **self-hosted Whisper** (бесплатно, WebM нативно)
+2. **Убраны**: Yandex Object Storage, format conversion, async polling workflow
+3. **open-notebook port**: 3000 → **8888** (actual default port)
+4. **GLM-4 endpoint**: `open.bigmodel.cn` → **`api.z.ai`** (current endpoint)
+5. **GLM-4 model**: `glm-4-flash` → **`glm-4.7-flashx`** (better value, 200K context)
+6. **File trigger**: `LocalFileTrigger` → **Schedule Trigger + folder scan** (reliability)
+7. **Стоимость**: 27,500 → **2,800 руб/мес**
+
+### Open Questions Resolved
+
+1. **open-notebook API**: YES, has full REST API
+2. **GLM-4 via n8n**: YES, OpenAI-compatible
+3. **Whisper vs SpeechKit**: Whisper побеждает по всем критериям для этого MVP
+4. **Yandex Cloud**: НЕ НУЖЕН — Whisper заменяет SpeechKit
+
+### Still Open (НУЖЕН ОТВЕТ ОТ ТЕБЯ)
+
+1. **NFS server IP and path** — ждём от руководителя (настроит Jibri)
+2. **Telegram chat ID** — какой групповой чат для дайджестов?
+3. **LEAD ID format** — только цифры? Из Bitrix24?
+
+---
+
+## 11. Telegram Chat History — Архитектура и реализация
+
+### Почему не бот
+
+Telegram Bot API **не может читать историю** — бот видит только новые сообщения после добавления в чат. Чтобы получить переписку которая уже была — нужен **Telethon (User API)**: работает от имени обычного аккаунта и читает всю историю.
+
+### Итоговая архитектура (2026-02-20)
+
+```
+Один рабочий Telegram-аккаунт
+    (добавлен во все групповые чаты с клиентами)
+            │
+            ▼
+  python export_telegram_chat.py
+  (запускается на сервере, читает историю через Telethon)
+            │
+            ▼
+  /exports/chats/LEAD-101_chat.json   ← полная история
+            │
+            ▼
+  python import_chat_to_db.py
+            │
+            ▼
+  PostgreSQL: таблица chat_messages
+            │
+            ▼  (каждый день в 22:00)
+  Workflow 03 (n8n)
+  → GLM-4 суммаризирует переписку за день
+  → Сохраняет в client_summaries
+            │
+            ▼  (каждый день в 23:00)
+  Workflow 02 (n8n)
+  → Собирает все summaries
+  → Отправляет дайджест в Telegram-бот @ffp_report_bot
+```
+
+### Как масштабировать на много клиентов
+
+Используется таблица `lead_chat_mapping`: один раз заполняешь соответствие "договор ↔ чат", дальше скрипт автоматически обходит все записи.
 
 ```sql
-processed_files      -- аудиозаписи, статусы, транскрипты
-chat_messages        -- история Telegram-переписки
-client_summaries     -- ежедневные саммари (звонки + чаты)
-lead_chat_mapping    -- lead_id ↔ chat_id ↔ dify_dataset_id
-prompts              -- LLM-промпты с версионированием
-extracted_tasks      -- задачи из транскриптов (WF06)
-system_settings      -- глобальные настройки
+-- Пример записи:
+INSERT INTO lead_chat_mapping (lead_id, lead_name, chat_id, chat_title)
+VALUES ('101', 'ООО Ромашка', -1009876543210, 'Ромашка — поставки');
 ```
 
-### Bitrix-таблицы (добавлены migrate_db_v3.sql)
+Как получить chat_id чата: `python list_telegram_chats.py` — выведет все чаты с ID.
+
+### Какой аккаунт использовать
+
+| Вариант | Плюсы | Минусы |
+|---------|-------|--------|
+| Личный аккаунт менеджера | Уже есть доступ ко всем чатам | Личная переписка попадёт в систему, риск блокировки |
+| Общий рабочий аккаунт | Безопасно, контролируемо | Нужно добавить в все группы вручную |
+
+**Рекомендация**: общий рабочий аккаунт.
+
+### Авторизация (один раз)
+
+1. `python list_telegram_chats.py` на компьютере → QR-вход → вводишь пароль двухфакторки
+2. Копируешь `mvp_session.session` на сервер через WinSCP
+3. Больше авторизация не нужна — сессия хранится в файле
+
+Подробнее про проблемы авторизации: см. E047–E052 в ERRORS.md
+
+---
+
+---
+
+## 12. Статус развёртывания (2026-02-19, ФИНАЛЬНЫЙ)
+
+### ✅ MVP ПОЛНОСТЬЮ РАБОТАЕТ
+
+| Компонент | Статус | Примечания |
+|-----------|--------|------------|
+| PostgreSQL | ✅ Running | Healthy |
+| SurrealDB | ✅ Running | v2, требует `chmod 777` на volume при первом запуске |
+| Whisper STT | ✅ Running | Протестирован, транскрибирует русский язык (модель medium) |
+| open-notebook | ✅ Running | UI на :8888, воркер стабилен |
+| n8n | ✅ Running | UI на :5678, workflows активны |
+| Telegram Bot | ✅ Работает | `@ffp_report_bot`, отправляет дайджесты |
+| **Workflow 01** | ✅ Полностью работает | Файл → Whisper → open-notebook → PostgreSQL ✅ |
+| **Workflow 02** | ✅ Полностью работает | PostgreSQL → GLM-4 → Telegram ✅ |
+
+### ✅ Полный E2E тест пройден (2026-02-19)
+
+**Workflow 01 (транскрипция):**
+```
+Тест: /mnt/recordings/2026/02/18/77777_2026-02-18_17-30.wav
+Результат:
+  ✅ n8n нашёл файл через List Recording Files
+  ✅ Parse Filenames извлёк LEAD_ID
+  ✅ Check If Already Processed — файл новый
+  ✅ Mark as Transcribing — запись в PostgreSQL
+  ✅ Whisper Transcribe — расшифровка
+  ✅ Save Transcript to Notebook
+  ✅ Mark Completed
+```
+
+**Workflow 02 (дайджест):**
+```
+Тест: Тестовые записи в processed_files (IDs 18, 19, 20)
+Результат:
+  ✅ Load Today's Transcripts → данные загружены
+  ✅ Aggregate Transcripts → combined text готов
+  ✅ Has Data? → true ветка
+  ✅ GLM-4 Summarize → успешный ответ (thinking disabled)
+  ✅ Build Digest → корректный дайджест
+  ✅ Chunk for Telegram → разбиение на части
+  ✅ Send Telegram → сообщение доставлено в @ffp_report_bot
+  ✅ Mark Summary Sent → summary_sent = true
+```
+
+### 🔧 Исправленные проблемы (сессии 1-3)
+
+| Проблема | Ошибка | Решение |
+|----------|--------|---------|
+| GLM-4 API баланс | E041 | Сменили на open.bigmodel.cn + рабочий ключ |
+| Telegram $env заблокирован | E042 | Хардкодировали токен и chat_id в ноде |
+| GLM-4 thinking mode | E043 | Добавили `thinking: {type: "disabled"}` |
+| Build Digest пустой | E043 | Fallback на reasoning_content |
+| Load Today's Transcripts стоп | E044 | Сброс summary_sent = false |
+| INSERT без filepath | E045 | Добавили обязательное поле filepath |
+
+### 📋 Что было сделано (summary)
+
+**Сессия 1:**
+- Развернута инфраструктура (docker-compose up)
+- Исправлены E020-E040 (SurrealDB, n8n cookie, env vars)
+- Workflow 01 протестирован и работает
+
+**Сессия 2:**
+- GLM-4 ключи перебраны, найден рабочий
+- Сменён endpoint: api.z.ai → open.bigmodel.cn
+- Telegram токен захардкожен в ноду
+- Первый тест Workflow 02 — сообщение в Telegram получено
+
+**Сессия 3:**
+- Обнаружена проблема GLM-4 thinking mode (E043)
+- Добавлен `thinking: {type: "disabled"}` в запрос GLM-4
+- Добавлен fallback на reasoning_content в Build Digest
+- Исправлена проблема с тестовыми данными (E044, E045)
+- **Финальный E2E тест — УСПЕШНО ✅**
+
+### 🔑 Доступы (сохранить в надёжном месте)
+
+| Сервис | URL | Данные |
+|--------|-----|--------|
+| n8n UI | `http://84.252.100.93:5678` | `rod@zevich.ru` / `Ill216johan511lol2` |
+| open-notebook | `http://84.252.100.93:8888` | Пароль из `.env` (`OPEN_NOTEBOOK_TOKEN`) |
+| Telegram Bot | `@ffp_report_bot` | Token: `8527521201:AAHpyrPn4cig-zq0Xymt7lZ94qBIEXnYAeQ` |
+| Telegram Chat ID | `-1003872092456` | Группа "Отчёты ФФ Платформы" |
+
+### 🔑 GLM-4 API — рабочий ключ
+
+| Ключ | Статус | Эндпоинт | Модель |
+|------|--------|----------|--------|
+| `fda5cc088ab04a1a92d5966b373e81a3.rfUescuUieAO78M6` | ✅ Рабочий | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | `glm-4.7-flash` |
+
+### ⚠️ Перед продакшеном
+
+1. **Очистить тестовые данные**: `DELETE FROM processed_files WHERE filename LIKE 'TEST%' OR filename LIKE 'test%';`
+2. **Подключить NFS** — когда руководитель настроит Jibri (записи реальных созвонов)
+3. **Добавить healthcheck для SurrealDB** (см. секцию 13)
+
+---
+
+## 13. docker-compose.yml — рекомендуемые улучшения для продакшена
+
+Добавить в `docker-compose.yml` перед деплоем:
+
+```yaml
+# 1. Healthcheck для SurrealDB (устраняет race condition с open-notebook)
+surrealdb:
+  healthcheck:
+    test: ["CMD-SHELL", "printf 'GET /health HTTP/1.0\r\n\r\n' | nc localhost 8000 | grep -q 'ok' || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 15s
+
+# 2. open-notebook depends_on surrealdb healthy
+open-notebook:
+  depends_on:
+    surrealdb:
+      condition: service_healthy
+```
+
+---
+
+---
+
+## 14. Фаза 2: Telegram чаты + индивидуальные summaries (2026-02-20)
+
+### 14.1. Новые компоненты
+
+| Компонент | Описание |
+|-----------|----------|
+| `chat_messages` (PostgreSQL) | Хранит историю Telegram переписки по клиентам |
+| `client_summaries` (PostgreSQL) | Хранит индивидуальные summaries (созвон / чат) |
+| `Workflow 03` (n8n) | Генерирует индивидуальные summaries из звонков и чатов |
+| `export_telegram_chat.py` | Выгрузка истории чата через Telethon (личный аккаунт) |
+| `import_chat_to_db.py` | Импорт выгруженного чата в PostgreSQL |
+| `generate_individual_summary.py` | Генерация summary на основе данных из БД (звонки + чаты) |
+| `combine_client_data.py` | Объединение summaries и генерация daily digest |
+
+### 14.2. Новые таблицы PostgreSQL
 
 ```sql
-bitrix_leads         -- все лиды и контакты из Bitrix
-                     -- поля: bitrix_lead_id, bitrix_entity_type, diffy_lead_id,
-                     --       title, name, contract_number, phone, email,
-                     --       responsible_id, stage_id, status_id, created_at,
-                     --       dify_dataset_id ← Dify блокнот (ИСПРАВЛЕНО 2026-03-12)
+-- Таблица для хранения истории Telegram чатов
+CREATE TABLE chat_messages (
+    id SERIAL PRIMARY KEY,
+    lead_id VARCHAR(50),
+    chat_title VARCHAR(255),
+    sender VARCHAR(100),
+    message_text TEXT,
+    message_date TIMESTAMP,
+    imported_at TIMESTAMP DEFAULT NOW(),
+    summary_sent BOOLEAN DEFAULT FALSE
+);
 
-bitrix_calls         -- звонки из crm.activity (TYPE_ID=1) + voximplant
-                     -- поля: bitrix_activity_id, diffy_lead_id, direction,
-                     --       call_duration, call_date, responsible_name,
-                     --       record_url, transcript_text, transcript_status
-
-bitrix_emails        -- письма из crm.activity (TYPE_ID=4), ПОЛНЫЙ ТЕКСТ
-                     -- поля: bitrix_activity_id, diffy_lead_id, direction,
-                     --       subject, email_body, email_from, email_to, email_date
-
-bitrix_comments      -- комментарии из crm.timeline.comment.list
-                     -- поля: bitrix_comment_id, diffy_lead_id,
-                     --       comment_text, author_name, comment_date
-
-bitrix_summaries     -- ежедневные Claude-саммари по лидам
-                     -- поля: diffy_lead_id, summary_date,
-                     --       calls_count, emails_count, comments_count,
-                     --       summary_text, dify_doc_id
-                     -- UNIQUE: (diffy_lead_id, summary_date)
-
-bitrix_sync_log      -- лог каждого запуска синхронизации
-                     -- поля: sync_type, status, leads_synced, calls_synced,
-                     --       emails_synced, comments_synced, error_message,
-                     --       started_at, completed_at
+-- Таблица для индивидуальных summaries
+CREATE TABLE client_summaries (
+    id SERIAL PRIMARY KEY,
+    lead_id VARCHAR(50),
+    source_type VARCHAR(20),  -- 'call' или 'chat'
+    source_id INTEGER,
+    summary_text TEXT,
+    summary_date DATE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
-**Связь таблиц:**
-- **Bitrix → Dify:** `bitrix_leads.dify_dataset_id` (✅ ИСПРАВЛЕНО 2026-03-12)
-- **Telegram → Dify:** `lead_chat_mapping.dify_dataset_id` (только для Telegram чатов)
+### 14.3. Workflow 03: Индивидуальные summaries
 
-**ВАЖНО:** После исправления бага (2026-03-12):
-- Bitrix данные используют `bitrix_leads.dify_dataset_id` ✅
-- Telegram данные используют `lead_chat_mapping.dify_dataset_id` ✅
-- Ранее был баг: Bitrix использовал `lead_chat_mapping` (неправильно) ❌
+```
+[Schedule 22:00]
+    │
+    ├── Load Today's Calls (processed_files)
+    │       → Prepare Calls
+    │       → GLM-4: Summarize Call (промпт для созвона)
+    │       → Extract Call Summary → Save to client_summaries
+    │
+    └── Load Today's Chats (chat_messages, агрегация по lead_id)
+            → Prepare Chats
+            → GLM-4: Summarize Chat (промпт для чата)
+            → Extract Chat Summary → Save to client_summaries
+```
 
-### Подключение к БД
+### 14.4. Как загрузить Telegram чаты
+
+**Вариант A (рекомендуется): через скрипт (Telethon)**
 
 ```bash
-# Снаружи (с хоста):
-postgresql://n8n:ill216johan511lol2@localhost:5432/n8n
+# Шаг 1: Посмотреть список своих чатов (получить их ID)
+cd /root/mvp-auto-summary/scripts
+python3 list_telegram_chats.py
+# Покажет все чаты с числовыми ID вида -1009876543210
 
-# Изнутри docker:
-postgresql://n8n:ill216johan511lol2@postgres:5432/n8n
+# Шаг 2: Выгрузить конкретный чат по ID
+python3 export_telegram_chat.py --chat -1009876543210 --lead-id 101
+# Результат: exports/chats/LEAD-101_chat.json
 
-# psql команда:
-docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n
+# Шаг 3: Загрузить в базу
+python3 import_chat_to_db.py --lead-id 101 --file ../exports/chats/LEAD-101_chat.json
 ```
 
----
+**API credentials (получены 2026-02-20, вшиты в скрипты):**
+- api_id: `32782815`
+- api_hash: `a4c241e64433835b4a335b62520ab005`
 
-## 6. Bitrix24 синхронизация — подробно
+**Таблица маппинга** `lead_chat_mapping`: связь договор ↔ Telegram чат.
+Заполняется один раз вручную, потом используется для автоматической ежедневной выгрузки всех чатов.
 
-### Что синхронизируется
+**Вариант B (ручной): copy-paste из Telegram Desktop**
 
-| Шаг | API метод | Результат |
-|-----|-----------|-----------|
-| 1 | `crm.lead.list` | 30 324 лидов → `bitrix_leads` |
-| 2 | `crm.contact.list` | 3 774 контактов → `bitrix_leads` |
-| 3 | `crm.activity.list` (TYPE_ID=1) | Звонки → `bitrix_calls` |
-| 4 | `voximplant.statistic.get` | URL записей звонков → `bitrix_calls.record_url` |
-| 5 | `crm.activity.list` (TYPE_ID=4) | Письма (полный текст) → `bitrix_emails` |
-| 6 | `crm.timeline.comment.list` | Комментарии → `bitrix_comments` |
-| 7 | Whisper | Транскрипция записей звонков |
-| 8 | Claude | Саммари по каждому лиду за каждую дату |
-| 9 | Dify API | Создание датасетов + пуш документов |
+1. Открой чат → скопируй сообщения в текстовый файл
+2. Сохрани как `LEAD-101_chat.txt` в формате `[ДД.ММ.ГГГГ ЧЧ:ММ] Имя: текст`
+3. Загрузи через WinSCP в `/root/mvp-auto-summary/exports/chats/`
+4. Запусти: `python3 import_chat_to_db.py --lead-id 101 --file LEAD-101_chat.txt --format txt`
 
-### Первый запуск (историческая синхронизация)
+### 14.5. Структура файлов summaries
 
-**Запущена: 2026-03-09 23:11 MSK, PID 804062.**
+```
+/root/mvp-auto-summary/exports/summaries/2026-02-20/
+├── LEAD-101_call_10-30_2026-02-20.md    ← summary созвона
+├── LEAD-101_chat_2026-02-20.md          ← summary чата
+├── LEAD-101_combined_2026-02-20.md      ← объединённое
+├── LEAD-102_call_14-00_2026-02-20.md
+├── LEAD-102_combined_2026-02-20.md
+└── daily_digest_2026-02-20.md           ← краткий дайджест для Telegram
+```
 
-Скрипт: `/root/mvp-auto-summary/scripts/run_historical_sync.py` (скопирован в контейнер как `/app/run_historical_sync.py`)
-
-Лог: `/root/bitrix_sync.log`
+### 14.6. Полный порядок действий на 2026-02-20
 
 ```bash
-# Следить за прогрессом:
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 "tail -50 /root/bitrix_sync.log"
+# 1. Настройка сервера (один раз):
+bash /root/mvp-auto-summary/scripts/setup_server_2026-02-20.sh
+
+# 2. Загрузить аудио через WinSCP:
+#    /mnt/recordings/2026/02/20/101_2026-02-20_10-30.mp3
+
+# 3. Запустить транскрипцию (Workflow 01 в n8n UI):
+#    http://84.252.100.93:5678 → Workflow 01 → Execute
+
+# 4. Загрузить чаты:
+python3 export_telegram_chat.py --chat "@клиент" --lead-id 101 ...
+python3 import_chat_to_db.py --lead-id 101 --file LEAD-101_chat.json ...
+
+# 5. Генерировать summaries:
+python3 generate_individual_summary.py --lead-id all --source both --db-password ПАРОЛЬ
+
+# 6. Финальный дайджест:
+python3 combine_client_data.py --send-telegram --bot-token ТОКЕН --chat-id -1003872092456
 ```
 
-### Конфигурация
-
-```env
-BITRIX_WEBHOOK_URL=https://bitrix24.ff-platform.ru/rest/1/fhh009wpvmby0tn6/
-BITRIX_CONTRACT_FIELD=UF_CRM_1632960743049
-BITRIX_SYNC_HOUR=6
-BITRIX_SYNC_ENABLED=True
-```
+---
 
 ---
 
-## 7. Dify — блокноты клиентов
+## 15. Статус на 2026-02-20 (тестирование с реальными данными)
 
-### Именование датасетов
+### Что сделано сегодня
 
-| Условие | Имя в Dify | Пример |
-|---------|-----------|--------|
-| Контакт/лид с ФФ-номером в `title`, без `BX-LEAD-` | **ФФ-4405** | Поиск по `[ФфFf][ФфFf]-?(\d+)` |
-| Лид (BX-LEAD-*) без ФФ-номера | BX-LEAD-1035 | Технический ID |
-| Jitsi-клиент (старая схема) | LEAD-42 | Из lead_chat_mapping |
+| Действие | Результат |
+|----------|-----------|
+| Авторизован рабочий Telegram аккаунт (session_evgenii) | ✅ |
+| Выгружены 6 чатов через export_telegram_chat.py | ✅ 3153 сообщения суммарно |
+| Залиты в PostgreSQL (chat_messages) | ✅ |
+| Заполнена таблица lead_chat_mapping | ✅ 6 записей |
+| Запущена суммаризация всей истории (--all-history) | 🔄 В процессе |
 
-### Формат документа в Dify
+### Договоры в системе
 
-Каждый документ имеет шапку:
-```markdown
-# Клиент: ФФ-4405
-# Номер договора: ФФ-4405
+Подробнее: см. `docs/CONTRACTS_AND_RAG.md`
 
-## Резюме (2026-03-08)
-(Claude-саммари за день)
-
-## Звонки (3 шт.)
-...
-
-## Письма (2 шт.)
-...
-```
-
-### Автосоздание датасетов
-
-Реализовано в `bitrix_summary.py`. При первом саммари для лида:
-1. Определяется имя: `ФФ-NNNN` (если есть) или `BX-LEAD-NNNN`
-2. `dify.create_dataset(name)` → новый UUID
-3. `db.save_bitrix_dataset_mapping(diffy_lead_id, dataset_id)` → запись в `bitrix_leads.dify_dataset_id` ✅
-4. Все последующие документы пушатся в этот датасет
-
-**ИСПРАВЛЕНО 2026-03-12:** Раньше использовался `lead_chat_mapping` (баг), теперь `bitrix_leads` (правильно).
+| lead_id | Чат | Сообщений |
+|---------|-----|-----------|
+| 4405 | Фулфилмент Платформа ФФ-4405 | 1463 |
+| 987 | Фулфилмент ФФ-987 | 297 |
+| 1381 | ФФ-1381_ТМП/Юнна | 1341 |
+| 2048 | Александр ФФ-2048 | 2 |
+| 4550 | Александр ФФ-4550 | 38 |
+| 506 | Юлия ФФ-506 | 12 |
 
 ---
 
-## 8. Доступы
-
-| Сервис | URL / Доступ |
-|--------|-------------|
-| **VPS** | `ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93` |
-| **Dify UI** | `https://dify-ff.duckdns.org` |
-| **Dify API** | `http://84.252.100.93/v1` (dataset API key в `.env`) |
-| **Summaries** | `http://84.252.100.93:8181/summaries/` |
-| **Telegram Bot** | `@ffp_report_bot` |
-| **Telegram Chat** | `-1003872092456` ("Отчёты ФФ Платформы") |
-| **Bitrix24** | `https://bitrix24.ff-platform.ru/rest/1/fhh009wpvmby0tn6/` |
-
-> SSH ключ: `C:\Users\User\.ssh\mvp_server`
-> Пароль сервера: `xe1ZlW0Rpiyk`
-> Подробнее: `docs/CREDENTIALS.md` (локально, в .gitignore)
-
----
-
-## 9. Стоимость (ежемесячно)
-
-| Компонент | Стоимость | Примечание |
-|-----------|-----------|------------|
-| VPS (2 vCPU, 8 GB) | ~2,500 руб | Ubuntu 22.04 |
-| Claude 3.5 Haiku (z.ai) | ~300–3000 руб | Зависит от объёма саммари |
-| Whisper (self-hosted) | **0 руб** | На VPS |
-| Dify (self-hosted) | **0 руб** | На VPS |
-| Bitrix24 | Уже оплачен | Только чтение по webhook |
-| **ИТОГО** | **~2,800–5,500 руб** | Расчёт при 30к лидов |
-
-> **Внимание**: при первой исторической синхронизации 30к лидов стоимость Claude API может быть выше — каждая дата активности генерирует отдельный вызов.
-
----
-
-## 10. Telegram бот команды
-
-| Команда | Действие |
-|---------|----------|
-| `/report` | Промежуточный отчёт по звонкам сегодня |
-| `/status` | Статус системы + очереди + клиенты |
-| `/rag` | Ссылка на Dify RAG-ассистент |
-| `/help` | Справка по командам |
-
----
-
-## 11. История версий
-
-| Версия | Дата | Что сделано |
-|--------|------|-------------|
-| 1.0 | 2026-02-18 | Первый запуск n8n + Jitsi pipeline |
-| 2.0 | 2026-03-04 | Миграция n8n → Python orchestrator (WF01-06) |
-| 3.0 | 2026-03-09 | Bitrix24 интеграция: 6 таблиц, sync, Claude summaries, Whisper |
-| **4.0** | **2026-03-09** | **Dify автосоздание датасетов, ФФ-именование блокнотов, историческая синхронизация** |
-| **4.1** | **2026-03-10** | **Исправление ФФ-именования: экстракция из title при синке (bitrix_sync.py)** |
-
-### v4.1 Детали (2026-03-10)
-
-**Исправленные баги:**
-- **E073**: Dify API `400 Bad Request` — убран `indexing_technique` из payload создания датасета
-- **E074**: ФФ-именование не работало — `_extract_contract_number` добавлена в `bitrix_sync.py`
-- **E076**: Контакты с договором назывались `LEAD-4405` — исправлено на `ФФ-4405`
-
-**Изменения в `bitrix_sync.py`:**
-```python
-# Логика diffy_lead_id теперь в Step 1 (синк лидов):
-ff_number = _extract_contract_number(lead.get("TITLE", ""))
-diffy_lead_id = ff_number if ff_number else f"BX-LEAD-{lead_id}"
-```
-
-**Результат:**
-- ~2,044 лидов из 31,005 теперь имеют `diffy_lead_id = "ФФ-XXXX"`
-- Блокноты Dify создаются с правильными именами (`ФФ-4405` вместо `BX-LEAD-1035`)
-- Куратор может спрашивать "как там ФФ-4405?" без технических ID
-
-### v4.0 Детали (2026-03-09)
-
-**Новые методы в `dify_api.py`:**
-- `create_dataset(name)` — создаёт новый датасет в Dify через `POST /v1/datasets`
-
-**Новые методы в `db.py`:**
-- `save_dataset_mapping(lead_id, dataset_id)` — upsert в `lead_chat_mapping`
-- `get_bitrix_activity_dates(diffy_lead_id)` — уникальные даты из calls + emails + comments (для исторической генерации саммари)
-
-**Изменения в `bitrix_summary.py`:**
-- `_extract_ff_number(title)` — извлекает `ФФ-NNNN` из названия лида
-- `generate_bitrix_summaries(target_date=None)` — при `None` обрабатывает ВСЮ историю по датам
-- Автосоздание Dify датасета при первом саммари для лида
-- Шапка каждого документа: `# Клиент: ФФ-4405`
-- Имя датасета: `ФФ-4405` для клиентов, `BX-LEAD-N` для лидов
-
-**Добавлено в `requirements.txt`:**
-- `requests>=2.31.0` (нужен для скачивания записей звонков в `bitrix_summary.py`)
-
----
-
-## 12. Известные ограничения и открытые вопросы
-
-| # | Описание | Статус |
-|---|----------|--------|
-| 1 | Историческая синхронизация 30к лидов — несколько часов | ✅ Завершена (2026-03-10 05:33, с ФФ-именованием) |
-| 2 | Саммари генерируются только для лидов с activity (calls/emails/comments) | ✅ Ожидаемо |
-| 3 | Записи Jitsi-звонков → отдельный pipeline (transcribe сервис), НЕ через bitrix_summary | ✅ Так и задумано |
-| 4 | tmux не установлен на сервере — используется `nohup &` | ℹ️ Норм |
-| 5 | Dify датасеты создаются при генерации саммари, НЕ при синке лидов | ℹ️ Намеренно (нет смысла создавать пустые датасеты) |
-
----
-
-*Создано: 2026-02-18 | Обновлено: 2026-03-10 v4.1 — Исправление ФФ-именования, экстракция из title*
-*Создано: 2026-02-18 | Обновлено: 2026-03-09 v4.0 — Dify автосоздание, ФФ-именование, историческая синхронизация*
+*Document created: 2026-02-18 | Updated: 2026-02-20 — Phase 2: реальные данные, 6 договоров, RAG-система*

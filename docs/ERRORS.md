@@ -1,495 +1,960 @@
 # Known Errors & Troubleshooting
 
 > База знаний ошибок: symptom → root cause → fix
-> Обновлено: 2026-03-12 v4.2 — **E069 (критический баг маппинга), E070-E071**
-
----
-
-## Быстрый поиск
-
-| Код | Тема |
-|-----|------|
-| E001–E009 | Setup / Docker |
-| E010–E019 | Pipeline (Whisper, LLM, Dify) |
-| E020–E045 | Deployment / n8n legacy |
-| E046–E058 | Recordings / Telegram / Jitsi |
-| E059–E060 | Python Orchestrator |
-| E061–E065 | Bitrix24 CRM Sync |
-| E066–E076 | **Bitrix24 CRM Sync + Dify блокноты** |
-
-**⚠️ КРИТИЧЕСКИЕ:**
-- **E069** — Bitrix датасеты в неправильной таблице (ИСПРАВЛЕНО 2026-03-12)
 
 ---
 
 ## Setup Errors
 
 ### E001: n8n не запускается — `N8N_ENCRYPTION_KEY required`
-**Fix**: `echo "N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)" >> .env && docker compose up -d`
+
+**Symptom**: Container exits with `Error: n8n requires an encryption key`  
+**Root Cause**: Missing `N8N_ENCRYPTION_KEY` in `.env`  
+**Fix**:
+```bash
+# Generate random key and add to .env
+echo "N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)" >> .env
+docker compose up -d
+```
+
+---
 
 ### E002: PostgreSQL connection refused
-**Fix**: `docker compose down && docker compose up -d`
+
+**Symptom**: n8n logs `Error: connect ECONNREFUSED postgres:5432`  
+**Root Cause**: PostgreSQL не успел запуститься до n8n  
+**Fix**: docker-compose уже содержит `depends_on` + `healthcheck`. Если всё равно падает:
+```bash
+docker compose down && docker compose up -d
+```
+
+---
+
+### E003: open-notebook не подключается к SurrealDB
+
+**Symptom**: open-notebook UI показывает ошибку подключения к базе  
+**Root Cause**: SurrealDB ещё стартует или неверные credentials  
+**Fix**:
+```bash
+# Проверить что SurrealDB запущен
+curl http://localhost:8000/health
+
+# Проверить credentials в .env
+# SURREAL_USER и SURREAL_PASSWORD должны совпадать
+```
 
 ---
 
 ## Pipeline Errors
 
-### E010: Whisper — `audio_file is required` (422)
-**Root Cause**: Файл не передан как binary form-data.
-**Fix**: `multipart-form-data`, field name = `audio_file`.
+### E010: Whisper — `audio_file is required`
 
-### E011: Whisper OOM
-**Fix**: Поменять `WHISPER_MODEL=small`, или увеличить RAM до 8+ GB.
+**Symptom**: Whisper возвращает 422 или `{"detail":"audio_file is required"}`  
+**Root Cause**: n8n HTTP Request не отправляет бинарный файл (нет Read Binary File или неверный inputDataFieldName)  
+**Fix**:
+1. Добавить ноду **Read Binary File** перед Whisper
+2. В HTTP Request выставить `multipart-form-data`
+3. Параметр `formBinaryData` → name: `audio_file`, inputDataFieldName: `data`
 
-### E012: Whisper timeout
-**Fix**: Увеличить timeout (600s+), использовать `small` модель.
+---
 
-### E014: LLM API timeout
-**Root Cause**: Транскрипт >50K токенов или временные проблемы z.ai.
-**Fix**: Retry с backoff (tenacity уже настроен). При систематическом — разбить на части.
+### E011: Whisper — контейнер падает (OOM)
+
+**Symptom**: `whisper` контейнер перезапускается, в логах `Killed` или OOM  
+**Root Cause**: Модель слишком тяжёлая для RAM VPS  
+**Fix**:
+1. Поменять `WHISPER_MODEL` на `small` или `medium`
+2. Увеличить RAM VPS до 8–16 GB
+
+---
+
+### E012: Whisper — timeout при длинных файлах
+
+**Symptom**: HTTP Request к Whisper падает по таймауту  
+**Root Cause**: Длинный файл + слабый CPU или короткий timeout в ноде  
+**Fix**:
+1. Увеличить timeout в HTTP Request (например, 600000)
+2. Использовать более лёгкую модель (`small`/`medium`)
+3. При необходимости — разбить файл на части
+
+---
+
+### E013: open-notebook API возвращает 401
+
+**Symptom**: `POST /sources` возвращает 401 Unauthorized  
+**Root Cause**: Неверный Bearer token  
+**Fix**: По умолчанию open-notebook использует `Authorization: Bearer password`. Проверить настройки аутентификации в open-notebook.
+
+---
+
+### E014: GLM-4 API timeout
+
+**Symptom**: HTTP Request к GLM-4 падает по таймауту  
+**Root Cause**: Длинный транскрипт (>50K tokens) или проблемы с API z.ai  
+**Fix**:
+1. Увеличить timeout в n8n HTTP Request node до 120 секунд
+2. Если транскрипт >100K tokens — разбить на части
+3. Попробовать fallback на GLM-4.7-Flash (бесплатный)
+
+---
 
 ### E015: Telegram — "chat not found"
+
+**Symptom**: Telegram sendMessage возвращает `{"ok": false, "description": "Bad Request: chat not found"}`  
+**Root Cause**: Бот не добавлен в чат или неверный chat_id  
 **Fix**:
+1. Добавить бота в нужный чат
+2. Получить правильный chat_id:
 ```bash
-curl "https://api.telegram.org/bot${TOKEN}/getUpdates"
-# Найти "chat":{"id":...} — это chat_id
+curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates"
+# Найти chat.id в ответе
 ```
-
-### E018: Dify — `Default model not found for text-embedding` (400)
-**Root Cause**: В Dify не настроена embedding-модель.
-**Fix**: Dify UI → Settings → Model Providers → OpenAI-compatible:
-- Base URL: `http://embeddings/v1`
-- API Key: `local-embeddings`
-- Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-- Set as **Default** for Text Embedding
-
-### E019: Dify — `provider_not_initialize` при create_dataset
-**Одно и то же что E018.** Без embedding-модели `indexing_technique: high_quality` не работает.
-**Альтернатива**: использовать `"indexing_technique": "economy"` — без embeddings, но поиск хуже.
 
 ---
 
-## Python Orchestrator Errors
+### E016: NFS mount dropped — recordings not detected
 
-### E059: WF03 не запускается (контейнер перезапущен после scheduled time)
-**Root Cause**: APScheduler при старте планирует задачи на СЛЕДУЮЩЕЕ время, пропуская прошедшее.
-**Fix**: Запустить вручную:
+**Symptom**: Новые файлы в /mnt/recordings не обнаруживаются  
+**Root Cause**: NFS mount отвалился  
+**Fix**:
 ```bash
-docker exec mvp-auto-summary-orchestrator-1 python -c "
-from app.config import get_settings
-from app.tasks.individual_summary import IndividualSummaryTask
-# ... запустить task.run()
+# Проверить mount
+mountpoint /mnt/recordings
+
+# Перемонтировать
+mount -a
+
+# Проверить автомонтирование в /etc/fstab
+```
+
+---
+
+### E017: Duplicate processing — file transcribed twice
+
+**Symptom**: Один и тот же файл транскрибируется повторно  
+**Root Cause**: Запись в processed_files не была создана (или PostgreSQL был недоступен)  
+**Fix**: Workflow должен СНАЧАЛА записать файл в PostgreSQL (status='transcribing'), ЗАТЕМ начинать обработку. Проверить порядок нод в Workflow 1.
+
+---
+
+---
+
+## Deployment Errors (обнаружены 2026-02-18 при первом запуске)
+
+### E020: SurrealDB — `unexpected argument '--auth' found`
+
+**Symptom**: SurrealDB перезапускается в цикле, в логах `error: unexpected argument '--auth' found`  
+**Root Cause**: В SurrealDB v2.x флаг `--auth` убрали — аутентификация включена по умолчанию  
+**Fix**: Убрать `--auth` из команды запуска в docker-compose.yml:
+```yaml
+# НЕПРАВИЛЬНО (v1.x синтаксис):
+command: start --auth --user root --pass pass file:/data/srdb.db
+
+# ПРАВИЛЬНО (v2.x синтаксис):
+command: start --user root --pass pass surrealkv:/data/srdb.db
+```
+Также: `file:` заменён на `surrealkv:` в v2.x.
+
+---
+
+### E021: SurrealDB — `Permission denied (os error 13)` на volume
+
+**Symptom**: SurrealDB стартует но сразу падает с `IO error: Permission denied`  
+**Root Cause**: Docker volume создаётся с правами root, а процесс SurrealDB не имеет прав на запись  
+**Fix**: Добавить `user: root` в секцию surrealdb в docker-compose.yml, либо вручную выставить права на volume:
+```bash
+docker compose stop surrealdb
+docker volume rm mvp-auto-summary_surrealdb_data
+docker volume create mvp-auto-summary_surrealdb_data
+docker run --rm -v mvp-auto-summary_surrealdb_data:/data alpine chmod 777 /data
+docker compose up -d surrealdb
+```
+
+---
+
+### E022: n8n — "secure cookie" ошибка в браузере
+
+**Symptom**: При открытии `http://IP:5678` браузер показывает:  
+`Your n8n server is configured to use a secure cookie, however you are either visiting this via an insecure URL, or using Safari.`  
+**Root Cause**: n8n по умолчанию требует HTTPS для cookies. При доступе по HTTP без домена — блокирует.  
+**Fix**: Добавить переменную окружения в docker-compose.yml (в секцию environment n8n):
+```yaml
+- N8N_SECURE_COOKIE=false
+```
+Затем пересоздать контейнер:
+```bash
+docker compose up -d --force-recreate n8n
+```
+**Важно**: Добавлять именно в docker-compose.yml, а не только в .env — иначе может не применяться.
+
+---
+
+### E023: n8n API — `'X-N8N-API-KEY' header required` (401)
+
+**Symptom**: Запросы к `/api/v1/*` возвращают 401 с сообщением `'X-N8N-API-KEY' header required`  
+**Root Cause**: n8n Public API требует API Key, не Basic Auth. Ключ нужно создать через UI.  
+**Fix**: 
+1. Войти в n8n UI (`http://IP:5678`)
+2. Меню → Settings → n8n API → **Create API Key**
+3. Использовать в запросах: `-H "X-N8N-API-KEY: <ключ>"`
+
+**Важно**: Попытка создать ключ напрямую через PostgreSQL INSERT не работает — n8n, по всей видимости, дополнительно обрабатывает ключ при создании через UI.
+
+---
+
+### E024: docker-compose.yml — предупреждение `version is obsolete`
+
+**Symptom**: `WARN[0000] the attribute 'version' is obsolete, it will be ignored`  
+**Root Cause**: В новых версиях Docker Compose поле `version:` убрали  
+**Fix**: Удалить строку `version: '3.8'` из начала docker-compose.yml:
+```bash
+sed -i '/^version:/d' docker-compose.yml
+```
+
+---
+
+### E025: n8n первый запуск — показывает форму регистрации вместо логина
+
+**Symptom**: При первом открытии n8n просит ввести email, имя и пароль  
+**Root Cause**: Это нормальное поведение — n8n создаёт первого пользователя  
+**Fix**: Придумать и ввести любые данные:
+- Email: `admin@mvp.local` (или любой)
+- Имя: любое
+- Пароль: тот же что в `.env` (`N8N_PASSWORD`)
+
+После этого использовать эти же данные для входа.
+
+---
+
+---
+
+### E026: n8n API — `POST method not allowed` для `/execute`
+
+**Symptom**: `POST /api/v1/workflows/{id}/execute` возвращает `{"message":"POST method not allowed"}`  
+**Root Cause**: В данной версии n8n этот endpoint не поддерживается через Public API  
+**Fix**: Запускать workflow вручную через UI (кнопка ▶ Execute workflow) или ждать триггера по расписанию. Workflow 01 запускается автоматически каждые 5 минут.
+
+---
+
+### E027: n8n API — credential создание требует `ssl` как строку
+
+**Symptom**: POST `/api/v1/credentials` возвращает длинную ошибку про `sshAuthenticateWith`, `sshHost` и т.д.  
+**Root Cause**: n8n API ожидает `ssl` как строку (`"disable"`, `"allow"`, `"require"`), а не boolean `false`  
+**Fix**:
+```json
+{"name":"PostgreSQL","type":"postgres","data":{"host":"postgres","port":5432,"database":"n8n","user":"n8n","password":"...","ssl":"disable","sshTunnel":false}}
+```
+
+---
+
+### E028: n8n API — импорт workflow с лишними полями
+
+**Symptom**: POST `/api/v1/workflows` возвращает `"request/body must NOT have additional properties"`  
+**Root Cause**: n8n API принимает только `name`, `nodes`, `connections`, `settings` — остальные поля (tags, staticData, triggerCount и др.) отклоняются  
+**Fix**: Перед импортом очистить JSON:
+```bash
+python3 -c "
+import sys, json
+wf = json.load(sys.stdin)
+clean = {'name': wf.get('name'), 'nodes': wf.get('nodes'), 'connections': wf.get('connections'), 'settings': wf.get('settings', {})}
+print(json.dumps(clean))
+" < workflow.json > workflow_clean.json
+```
+
+---
+
+### E029: 02-daily-digest.json — невалидный JSON escape
+
+**Symptom**: `json.decoder.JSONDecodeError: Invalid \escape: line 67`  
+**Root Cause**: В jsonBody строке были `\'` (экранированные одиночные кавычки) — невалидный escape в JSON  
+**Fix**: Убрать `\'` → заменить на обычный текст без кавычек. В файле исправлено: `\'Нет\'` → `Нет`
+
+---
+
+### E030: Telegram бот не получает сообщения из группы
+
+**Symptom**: `getUpdates` возвращает `{"ok":true,"result":[]}` после добавления бота в группу  
+**Root Cause**: Бот создан с `can_read_all_group_messages: false` — по умолчанию боты не читают все сообщения группы, только те где их упомянули или команды (`/cmd`)  
+**Гипотезы и решения**:
+1. **Упомянуть бота**: написать `@ffp_report_bot тест` в группе — бот увидит сообщение с упоминанием
+2. **Включить Group Privacy mode OFF**: через @BotFather → выбрать бота → Bot Settings → Group Privacy → Turn off. После этого бот будет видеть все сообщения группы
+3. **Использовать getUpdates после отправки**: getUpdates работает только если сообщение пришло ПОСЛЕ последнего вызова getUpdates (или добавить `offset=0`)
+4. **Проверить что бот добавлен именно в нужную группу**: команда `getMe` показала имя `@ffp_report_bot` — убедиться что добавлен именно этот бот
+
+**Правильный порядок действий**:
+```
+1. @BotFather → /mybots → @ffp_report_bot → Bot Settings → Group Privacy → Disable
+2. Удалить бота из группы и добавить снова
+3. Написать в группе любое сообщение
+4. curl "https://api.telegram.org/bot{TOKEN}/getUpdates"
+```
+
+---
+
+### E031: n8n workflow execution — status `canceled`, lastNode `None`
+
+**Symptom**: Execution завершается со статусом `canceled`, `lastNode: None`, `error: {}`  
+**Root Cause**: Workflow запущен вручную через UI кнопку Stop или execution был отменён до начала работы. Также может означать что `/recordings` папка пуста или файлы не найдены командой `find`  
+**Диагностика**:
+```bash
+# Проверить что n8n видит файлы
+docker exec mvp-auto-summary-n8n-1 find /recordings -type f -name "*.wav" -o -name "*.mp3" -o -name "*.webm"
+```
+**Fix**: Убедиться что файл существует внутри контейнера, затем запустить workflow заново (не нажимать Stop).
+
+---
+
+---
+
+### E032: n8n IF нода — `Unknown filter parameter operator "boolean:notTrue"`
+
+**Symptom**: Workflow останавливается на IF ноде сразу, в логах `Unknown filter parameter operator "boolean:notTrue"`  
+**Root Cause**: n8n 2.8.x не поддерживает оператор `notTrue` в IF нодах  
+**Fix**: Заменить оператор на `equal` и поменять местами TRUE/FALSE ветки в connections:
+```json
+// БЫЛО (не работает в 2.8.x):
+"operator": { "type": "boolean", "operation": "notTrue" }
+// СТАЛО:
+"operator": { "type": "boolean", "operation": "equal" }
+```
+В connections поменять `[[{node: "Next"}], []]` на `[[], [{node: "Next"}]]`
+
+---
+
+### E033: n8n workflow — `status: success, lastNode: None` (файл уже обработан)
+
+**Symptom**: Workflow выполняется успешно но ничего не делает — `lastNode: None`  
+**Root Cause**: Файл уже есть в таблице `processed_files` — нода "Is New File?" пропускает его  
+**Диагностика**:
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT filename, status FROM processed_files;"
+```
+**Fix**: Создать новый тестовый файл с другим именем или очистить таблицу:
+```bash
+# Новый файл:
+cp /mnt/recordings/2026/02/18/99999_2026-02-18_14-30.wav \
+   /mnt/recordings/2026/02/18/12345_2026-02-18_15-00.wav
+# Или очистить processed_files:
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "DELETE FROM processed_files;"
+```
+
+---
+
+### E034: n8n — `EXECUTIONS_TIMEOUT overflow` (TimeoutOverflowWarning)
+
+**Symptom**: В логах n8n: `TimeoutOverflowWarning: 3600000000 does not fit into a 32-bit signed integer. Timeout duration was set to 1.` Workflows завершаются мгновенно.  
+**Root Cause**: `EXECUTIONS_TIMEOUT` задан в миллисекундах (3600000), но n8n 2.x ожидает значение в **секундах**  
+**Fix**: Исправить в docker-compose.yml:
+```yaml
+# БЫЛО (миллисекунды — слишком большое число):
+- EXECUTIONS_TIMEOUT=3600000
+- EXECUTIONS_TIMEOUT_MAX=7200000
+# СТАЛО (секунды):
+- EXECUTIONS_TIMEOUT=1800
+- EXECUTIONS_TIMEOUT_MAX=3600
+```
+Затем: `docker compose up -d --force-recreate n8n`
+
+---
+
+---
+
+### E035: open-notebook — `TimeoutError: timed out during opening handshake` (неверные имена env-переменных)
+
+**НАСТОЯЩАЯ ПРИЧИНА** (найдена 2026-02-18): open-notebook ожидает `SURREAL_URL` и `SURREAL_PASSWORD`, а в docker-compose.yml были прописаны `SURREAL_ADDRESS` и `SURREAL_PASS` — из-за этого приложение не получало адрес БД и падало.
+
+**Дополнительно**: образ `surrealdb:latest` может быть v3, который несовместим с open-notebook. Нужно пиновать `v2`.
+
+**Симптом**: В логах open-notebook:
+
+**Symptom**: В логах open-notebook:
+```
+TimeoutError: timed out during opening handshake
+WARN exited: worker (exit status 1; not expected)
+INFO spawned: 'worker' with pid XXXXX
+```
+Контейнер циклично перезапускает воркеры. В n8n нода "Get Notebooks" / "Save Transcript to Notebook" возвращает ошибку. В processed_files запись имеет `status='error'`.
+
+**Root Cause**: Неверные имена переменных окружения в docker-compose.yml:
+
+| Неправильно (не работает) | Правильно |
+|---------------------------|-----------|
+| `SURREAL_ADDRESS=ws://...` | `SURREAL_URL=ws://surrealdb:8000/rpc` |
+| `SURREAL_PASS=...` | `SURREAL_PASSWORD=...` |
+
+open-notebook читает только `SURREAL_URL` и `SURREAL_PASSWORD`. При неверных именах переменная не передаётся в приложение, WebSocket открывается с пустым/дефолтным URL и немедленно падает.
+
+**Дополнительная причина 1**: `surrealdb:latest` может подтянуть v3, несовместимую с open-notebook (которая рассчитана на v2).
+
+**Дополнительная причина 2**: volume `surrealdb_data` создан образом с uid `65532`, а контейнер запущен с `user: root` — конфликт прав приводит к `read only transaction` при попытке писать в БД. Решается пересозданием volume с правильными правами (или удалением старого volume и пересозданием).
+
+**Диагностика**:
+```bash
+# Проверить что именно получает open-notebook
+docker exec mvp-auto-summary-open-notebook-1 env | grep -i surreal
+# Если видишь SURREAL_ADDRESS вместо SURREAL_URL — это и есть причина
+
+# Проверить что SurrealDB работает в read-write режиме
+python3 -c "
+import urllib.request, base64
+creds = base64.b64encode(b'root:ПАРОЛЬ').decode()
+req = urllib.request.Request('http://localhost:8000/sql',
+  data=b'INFO FOR DB;',
+  headers={'Authorization': 'Basic '+creds, 'surreal-ns':'open_notebook',
+           'surreal-db':'open_notebook', 'Content-Type':'application/json'})
+print(urllib.request.urlopen(req, timeout=5).read().decode())
 "
+# Если видишь "read only transaction" — SurrealDB запущен неправильно
 ```
 
-### E060: Dify — `provider_not_initialize` (подробно)
-**Fix**: См. E018/E019 выше. Embeddings не настроены.
+**Fix**: Исправить docker-compose.yml:
+```yaml
+# НЕПРАВИЛЬНО:
+environment:
+  - SURREAL_ADDRESS=ws://surrealdb:8000/rpc   # ← неверное имя!
+  - SURREAL_PASS=${SURREAL_PASSWORD}            # ← неверное имя!
+
+# ПРАВИЛЬНО:
+environment:
+  - SURREAL_URL=ws://surrealdb:8000/rpc        # ← правильное имя
+  - SURREAL_PASSWORD=${SURREAL_PASSWORD}        # ← правильное имя
+```
+
+Также пиновать версии:
+```yaml
+surrealdb:
+  image: surrealdb/surrealdb:v2        # не latest!
+
+open-notebook:
+  image: lfnovo/open_notebook:v1-latest  # не latest!
+```
+
+После исправления:
+```bash
+docker compose up -d --force-recreate surrealdb open-notebook
+sleep 40
+docker compose logs open-notebook --tail=8
+# Должно быть: "success: worker entered RUNNING state" — стабильно, без "exited"
+```
 
 ---
 
-## Bitrix24 CRM Sync Errors
+### E036: Тестовый WAV из случайного шума — Whisper возвращает пустой текст или музыку
 
-### E061: `ModuleNotFoundError: No module named 'app.integrations'`
-**Root Cause**: Старый Docker образ без `app/integrations/`.
-**Fix**: `docker compose build orchestrator && docker compose up -d orchestrator`
+**Symptom**: Workflow 01 выполняется успешно (Mark Completed), но в open-notebook транскрипт пустой или содержит `[СПОКОЙНАЯ МУЗЫКА]` / `[Тихая музыка]`.
 
-### E062: `AttributeError: Settings object has no attribute 'bitrix_webhook_url'`
-**Root Cause**: В контейнере старая версия `app/config.py`.
-**Fix**:
+**Root Cause**: Тестовый файл создан из `/dev/urandom` или синусоиды — это не речь. Whisper правильно распознаёт что речи нет.
+
+**Fix**: Для полноценного теста pipeline нужен файл с реальной речью:
 ```bash
-docker compose build orchestrator && docker compose up -d orchestrator
-# Или:
-docker cp app/config.py mvp-auto-summary-orchestrator-1:/app/app/config.py
+# На сервере — скачать тестовый файл с речью на русском
+mkdir -p /mnt/recordings/2026/02/18
+cd /tmp
+wget -q "https://www2.cs.uic.edu/~i101/SoundFiles/gettysburg10.wav" -O test_speech.wav 2>/dev/null || \
+  dd if=/dev/urandom bs=96000 count=1 > /mnt/recordings/2026/02/18/88888_2026-02-18_10-00.wav
 ```
+Или использовать реальную запись созвона.
 
-### E063: Bitrix sync job не добавляется в scheduler
-**Root Cause**: `BITRIX_SYNC_ENABLED=False` или `BITRIX_WEBHOOK_URL` пустой.
-**Fix**: Проверить `.env`:
-```bash
-grep BITRIX /root/mvp-auto-summary/.env
-# Должно быть:
-# BITRIX_WEBHOOK_URL=https://bitrix24.ff-platform.ru/rest/1/fhh009wpvmby0tn6/
-# BITRIX_SYNC_ENABLED=True
-docker compose restart orchestrator
-```
-
-### E064: `relation "bitrix_leads" does not exist`
-**Root Cause**: Миграция `migrate_db_v3.sql` не применена.
-**Fix**:
-```bash
-docker cp scripts/migrate_db_v3.sql mvp-auto-summary-postgres-1:/tmp/
-docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -f /tmp/migrate_db_v3.sql
-```
-
-### E065: `Bitrix24 rate limit exceeded after 3 retries` (RuntimeError)
-**Root Cause**: Bitrix ограничивает 2 запроса/сек. Большой батч → 429.
-**Fix**: Одиночные сбои самоустраняются (retry встроен). При систематических — перенести `BITRIX_SYNC_HOUR=3` (3:00 ночи, минимальный трафик).
+**Важно**: Даже с пустым транскриптом pipeline работает корректно — нода "Has Transcript?" проверяет наличие текста и направляет в "Mark Error" при пустом результате. Это ожидаемое поведение, не баг.
 
 ---
 
-## Bitrix + Dify автосоздание (E066–E072)
+### E037: processed_files — файл застрял в статусе `error` или `transcribing`
 
-### E066: `ModuleNotFoundError: No module named 'requests'` при запуске run_historical_sync.py
-**Дата**: 2026-03-09
-**Root Cause**: `bitrix_summary.py` использует `requests` для скачивания записей звонков, но в контейнере установлен только `httpx`.
-**Fix**:
+**Symptom**: Повторный запуск workflow пропускает файл — он уже есть в processed_files. Файл не обрабатывается заново.
+
+**Root Cause**: Нода "Is New File?" проверяет наличие записи в processed_files. Если запись есть (в любом статусе) — файл считается обработанным.
+
+**Диагностика**:
 ```bash
-docker exec mvp-auto-summary-orchestrator-1 pip install requests -q
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "SELECT filename, status, summary_sent, created_at FROM processed_files ORDER BY created_at DESC LIMIT 10;"
 ```
-**Постоянный фикс**: `requests>=2.31.0` добавлен в `requirements.txt` на сервере.
+
+**Fix (сброс конкретного файла)**:
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "DELETE FROM processed_files WHERE filename = '77777_2026-02-18_17-30.wav';"
+```
+
+**Fix (полная очистка для тестирования)**:
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n \
+  -c "DELETE FROM processed_files;"
+```
+После этого запустить Workflow 01 вручную через n8n UI.
 
 ---
 
-### E067: `IndentationError` в `dify_api.py` после редактирования
-**Дата**: 2026-03-09
-**Root Cause**: При добавлении метода `create_dataset` через Edit tool нарушились отступы — метод `close()` потерял тело.
+### E038: n8n — `/recordings` внутри контейнера read-only
+
+**Symptom**: При попытке создать файл внутри контейнера n8n: `EROFS: read-only file system, open '/recordings/...'`
+
+**Root Cause**: В docker-compose.yml папка `/recordings` монтируется с флагом `:ro` (read-only):
+```yaml
+- /mnt/recordings:/recordings:ro
+```
+Это сделано намеренно — n8n только читает файлы, не модифицирует.
+
+**Fix**: Создавать тестовые файлы НА СЕРВЕРЕ (не внутри контейнера):
+```bash
+# ПРАВИЛЬНО — на хосте:
+mkdir -p /mnt/recordings/2026/02/18
+dd if=/dev/urandom bs=96000 count=1 > /mnt/recordings/2026/02/18/77777_2026-02-18_17-30.wav
+
+# НЕПРАВИЛЬНО — внутри контейнера:
+docker exec mvp-auto-summary-n8n-1 node -e "fs.writeFileSync('/recordings/...')" # → EROFS
+```
+
+---
+
+### E039: python3 не найден в контейнере n8n
+
+**Symptom**: `sh: python3: not found` при попытке запустить Python внутри n8n контейнера.
+
+**Root Cause**: Образ `n8nio/n8n:latest` основан на Node.js Alpine — Python не установлен.
+
+**Fix**: Использовать Node.js (он есть в контейнере):
+```bash
+docker exec mvp-auto-summary-n8n-1 node -e "console.log('works')"
+```
+Для создания файлов — использовать хост или bash-команды.
+
+---
+
+### E040: curl не найден в контейнере open-notebook
+
+**Symptom**: `OCI runtime exec failed: exec failed: unable to start container process: exec: "curl": executable file not found in $PATH`
+
+**Root Cause**: Контейнер `lfnovo/open_notebook` не включает curl.
+
+**Fix**: Использовать wget:
+```bash
+docker exec mvp-auto-summary-open-notebook-1 wget -qO- http://surrealdb:8000/health
+```
+
+---
+
+### E041: GLM-4 API — `Insufficient balance` (код 1113)
+
+**Symptom**: HTTP Request к `api.z.ai` или `open.bigmodel.cn` возвращает:
+```json
+{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}
+```
+
+**Root Cause**: На API-аккаунте ZhipuAI закончились кредиты. **Важно**: GLM-4.7 в веб-интерфейсе (chat.z.ai) — это отдельный продукт, он не связан с API-балансом. Можно пользоваться веб-версией при нулевом API-балансе.
+
+**Диагностика** (проверить конкретный ключ):
+```bash
+curl -s -X POST https://open.bigmodel.cn/api/paas/v4/chat/completions \
+  -H "Authorization: Bearer ВАШ_КЛЮЧ" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.7-flash","messages":[{"role":"user","content":"Hi"}],"max_tokens":5}'
+```
+- `{"choices":[...]}` → ключ работает ✅
+- `{"error":{"code":"1113",...}}` → нет баланса ❌
+- `{"error":{"code":"1211",...}}` → модель не существует (попробовать другое имя)
+
+**Рабочие имена моделей** на `open.bigmodel.cn`:
+- `glm-4.7-flash` ✅ — бесплатная квота
+- `glm-4.7-flashx` — платная
+- `glm-4.7` — платная, высокое качество
+
+**Fix**:
+1. Найти рабочий ключ: перебрать все ключи curl-командой выше
+2. В n8n обновить ноду GLM-4 Summarize:
+   - URL: `https://open.bigmodel.cn/api/paas/v4/chat/completions`
+   - Authorization: `Bearer РАБОЧИЙ_КЛЮЧ`
+   - model в jsonBody: `glm-4.7-flash`
+
+---
+
+### E042: n8n — `access to env vars denied` в ноде Telegram
+
+**Symptom**: Workflow 02 падает на ноде "Send Telegram":
+```
+Problem in node 'Send Telegram'
+access to env vars denied
+```
+
+**Root Cause**: n8n 2.x с External Runners блокирует `$env` в expressions. Переменные `$env.TELEGRAM_BOT_TOKEN` и `$env.TELEGRAM_CHAT_ID` недоступны при ручном или автоматическом запуске.
+
+**Затронутые ноды**: любая нода с `$env.*` в expressions:
+- URL: `={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}`
+- jsonBody: `={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, ... }) }}`
+
+**Fix**: Заменить `$env.*` на хардкодированные значения:
+- URL: тип "Fixed" → `https://api.telegram.org/botТОКЕН/sendMessage`
+- `chat_id` в jsonBody: заменить `$env.TELEGRAM_CHAT_ID` на числовое значение
+
+**Получить значения** (если не знаешь):
+```bash
+# На сервере (через PuTTY):
+grep -i telegram /root/mvp-auto-summary/.env
+```
+
+**Долгосрочное решение**: Использовать n8n Credentials (тип "Generic Credential") для хранения токенов вместо env vars.
+
+---
+
+### E043: GLM-4.7-Flash возвращает пустой `content` (thinking-модель)
+
+**Symptom**: Workflow 02 выполняется успешно, GLM-4 возвращает ответ, но в Telegram приходит:
+```
+Ежедневный дайджест за 19.02.2026
+Встреч: 3
+Клиенты: LEAD-101, LEAD-102, LEAD-103
+
+Сводка не получена.
+```
+
+При этом в execution видно, что `message.content` пустой, а `message.reasoning_content` содержит длинный текст ("Analyze the Request...", "Draft 1...", "Draft 2..." и т.д.).
+
+**Root Cause**: Модель `glm-4.7-flash` — это **thinking-модель** (модель с цепочкой рассуждений). По умолчанию она:
+1. Пишет ход рассуждений в поле `reasoning_content`
+2. Пишет финальный ответ в поле `content`
+3. Иногда `content` остаётся пустым — весь ответ в `reasoning_content`
+
+Нода Build Digest читала только `content` → пусто → "Сводка не получена".
+
+**Доказательство** (официальная документация ZhipuAI):
+- Документация Thinking Mode: https://docs.z.ai/guides/capabilities/thinking-mode
+- GLM-4.5 и выше (включая GLM-4.7-Flash) по умолчанию включают thinking mode
+- Поле `reasoning_content` появляется только у thinking-моделей
+
+**Fix (рекомендуется)**: Отключить thinking mode в запросе:
+```json
+{
+  "model": "glm-4.7-flash",
+  "messages": [...],
+  "temperature": 0.2,
+  "max_tokens": 1400,
+  "stream": false,
+  "thinking": { "type": "disabled" }
+}
+```
+
+В n8n нода GLM-4 Summarize → jsonBody (Expression):
+```javascript
+={{ JSON.stringify({ 
+  model: 'glm-4.7-flash', 
+  messages: [...], 
+  temperature: 0.2, 
+  max_tokens: 1400, 
+  stream: false, 
+  thinking: { type: "disabled" } 
+}) }}
+```
+
+**Fallback (дополнительная защита)**: Обновить ноду Build Digest:
+```javascript
+const msg = $json.choices && $json.choices[0] && $json.choices[0].message ? $json.choices[0].message : {};
+const rawContent = (msg.content || '').trim();
+const rawReasoning = (msg.reasoning_content || '').trim();
+const summaryText = rawContent || rawReasoning || 'Сводка не получена.';
+```
+
+**Проверка после фикса**:
+```bash
+curl -s -X POST https://open.bigmodel.cn/api/paas/v4/chat/completions \
+  -H "Authorization: Bearer ВАШ_КЛЮЧ" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.7-flash","messages":[{"role":"user","content":"Привет"}],"max_tokens":50,"thinking":{"type":"disabled"}}'
+```
+Ожидается: `content` заполнен, `reasoning_content` пустой или отсутствует.
+
+---
+
+### E044: Workflow 02 останавливается на Load Today's Transcripts
+
+**Symptom**: Workflow 02 выполняется, но последняя зелёная нода — "Load Today's Transcripts". Дальше workflow не идёт.
+
+**Root Cause**: SQL запрос возвращает 0 строк. Возможные причины:
+
+1. **`summary_sent = true`** — записи уже обработаны предыдущим запуском
+2. **`transcript_text IS NULL`** — нет текста транскрипта
+3. **Дата не совпадает** — view `v_today_completed` фильтрует по текущей дате
+
+**Диагностика**:
+```bash
+# Проверить данные в view
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT * FROM v_today_completed LIMIT 5;"
+
+# Проверить фильтр summary_sent
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT id, summary_sent, transcript_text IS NOT NULL as has_text FROM processed_files WHERE status='completed' ORDER BY id DESC LIMIT 10;"
+```
+
+**Fix**:
+```bash
+# Сбросить summary_sent для повторной обработки
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "UPDATE processed_files SET summary_sent = false WHERE id IN (18, 19, 20);"
+```
+
+**Fix (создать тестовые данные)**:
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "INSERT INTO processed_files (filename, filepath, lead_id, status, summary_sent, transcript_text, created_at) VALUES ('TEST101_2026-02-19.wav', '/recordings/TEST101.wav', 101, 'completed', false, 'Текст транскрипта...', NOW());"
+```
+
+**Важно**: Поле `filepath` обязательное (NOT NULL constraint).
+
+---
+
+### E045: INSERT в processed_files — null value in column "filepath"
+
 **Symptom**:
 ```
-IndentationError: expected an indented block after function definition on line 73
-```
-**Fix**: Полностью перезаписан `dify_api.py` через `mcp_write`. Финальная версия — 106 строк, все методы с правильными отступами.
-
----
-
-### E068: `AttributeError: Settings object has no attribute 'glm4_api_key'`
-**Дата**: 2026-03-09
-**Root Cause**: В `run_historical_sync.py` использовались старые имена полей `glm4_api_key`, `glm4_base_url`, `glm4_model`, тогда как в `config.py` они называются `llm_api_key`, `llm_base_url`, `llm_model`.
-**Fix**: Исправлено в скрипте:
-```python
-# БЫЛО:
-llm = LLMClient(api_key=s.glm4_api_key, base_url=s.glm4_base_url, model=s.glm4_model)
-# СТАЛО:
-llm = LLMClient(api_key=s.llm_api_key, base_url=s.llm_base_url, model=s.llm_model)
+ERROR: null value in column "filepath" of relation "processed_files" violates not-null constraint
 ```
 
----
+**Root Cause**: Таблица `processed_files` имеет обязательное поле `filepath`. При INSERT без указания filepath — ошибка.
 
-### E069: **КРИТИЧЕСКИЙ БАГ** Bitrix датасеты сохраняются в неправильную таблицу
-**Дата**: 2026-03-12 (обнаружено и исправлено)
-**Severity:** CRITICAL — влияет на все данные клиентов
-
-**Symptoms:**
-- Датасеты Bitrix НЕ сохраняются в `bitrix_leads.dify_dataset_id`
-- Повторное создание датасетов при каждом запуске (дубликаты в Dify UI)
-- Данные из Telegram/Jitsi НЕ попадают в Bitrix датасеты
-- В `bitrix_leads` все `dify_dataset_id = NULL`
-
-**Root Cause:**
-`app/core/db.py` использовал старые функции `get_dataset_map()` и `save_dataset_mapping()`, которые работали с таблицей `lead_chat_mapping` (предназначенной для Telegram), вместо новой таблицы `bitrix_leads.dify_dataset_id`.
-
-**Неправильный код:**
-```python
-# bitrix_summary.py:137
-dataset_map = db.get_dataset_map()  # ❌ читал из lead_chat_mapping
-
-# bitrix_summary.py:168
-db.save_dataset_mapping(diffy_lead_id, dataset_id)  # ❌ писал в lead_chat_mapping
-```
-
-**Fix:**
-1. Добавлены новые функции в `db.py`:
-   - `get_bitrix_dataset_map()` — читает из `bitrix_leads`
-   - `save_bitrix_dataset_mapping()` — пишет в `bitrix_leads`
-
-2. Обновлён `bitrix_summary.py`:
-   ```python
-   dataset_map = db.get_bitrix_dataset_map()  # ✅ из bitrix_leads
-   db.save_bitrix_dataset_mapping(diffy_lead_id, dataset_id)  # ✅ в bitrix_leads
-   ```
-
-3. SQL миграция (`scripts/migrate_fix_bitrix_mapping.sql`):
-   - Перенесено 4,154 датасета из `lead_chat_mapping` в `bitrix_leads`
-   - Удалено 3,366 неправильных записей Bitrix из `lead_chat_mapping`
-   - Сохранено 2 Telegram маппинга (правильно)
-
-**Результат миграции:**
-| До миграции | После миграции |
-|-------------|----------------|
-| `bitrix_leads`: 0 с dataset | `bitrix_leads`: 4,154 с dataset ✅ |
-| `lead_chat_mapping`: 3,366 Bitrix ❌ | `lead_chat_mapping`: 0 Bitrix ✅ |
-| `lead_chat_mapping`: 2 Telegram ✅ | `lead_chat_mapping`: 2 Telegram ✅ |
-
-**Verification:**
+**Fix**: Всегда указывать filepath:
 ```bash
-# Проверить что датасеты есть в bitrix_leads
-docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \
-  "SELECT bitrix_entity_type, COUNT(dify_dataset_id) FROM bitrix_leads \
-   GROUP BY bitrix_entity_type;"
+# НЕПРАВИЛЬНО:
+INSERT INTO processed_files (filename, lead_id, status, ...) VALUES (...);
 
-# Проверить что в lead_chat_mapping нет Bitrix
-docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \
-  "SELECT COUNT(*) FROM lead_chat_mapping \
-   WHERE lead_id LIKE 'ФФ-%' OR lead_id LIKE 'BX-%';"
-```
-
-**Файлы:**
-- `app/core/db.py` — новые функции (+62 строки)
-- `app/tasks/bitrix_summary.py` — обновлён (2 строки)
-- `scripts/migrate_fix_bitrix_mapping.sql` — миграция (+103 строки)
-- `PHASE1_COMPLETION_REPORT.md` — полный отчёт
-
-**Связанные ошибки:**
-- E069 — проблема с обновлением файлов в контейнере
-- E072 — возможны дубликаты датасетов в Dify UI после этого бага
-
----
-
-### E070: Дубликаты датасетов в Dify UI после исправления E069
-**Дата:** 2026-03-12
-**Symptoms:** В Dify UI видно несколько датасетов с одним названием (например, "ФФ-4405", "BX-LEAD-12345")
-**Root Cause:** Из-за бага E069 каждый запуск создавал новый датасет (старый не находился в неправильной таблице)
-**Fix:**
-1. Опционально удалить дубликаты вручную через Dify UI
-2. Или оставить (не критично) — система будет использовать правильный датасет из `bitrix_leads.dify_dataset_id`
-**Prevention:** После исправления E069 новые дубликаты не создаются
-
----
-
-### E071: `AttributeError: Database object has no attribute 'get_bitrix_leads_for_sync'` (в контейнере)
-**Дата**: 2026-03-09
-**Root Cause**: `scp` обновил файлы на хосте (`/root/mvp-auto-summary/`), но контейнер использует файлы из образа (build-time). Новые методы не были доступны.
-**Fix**: Копировать файлы **напрямую в контейнер**:
-```bash
-docker cp /root/mvp-auto-summary/app/core/db.py mvp-auto-summary-orchestrator-1:/app/app/core/db.py
-docker cp /root/mvp-auto-summary/app/core/dify_api.py mvp-auto-summary-orchestrator-1:/app/app/core/dify_api.py
-docker cp /root/mvp-auto-summary/app/tasks/bitrix_summary.py mvp-auto-summary-orchestrator-1:/app/app/tasks/bitrix_summary.py
-```
-**Проверка**:
-```bash
-docker exec mvp-auto-summary-orchestrator-1 python -c \
-  "from app.core.db import Database; print(hasattr(Database, 'get_bitrix_leads_for_sync'))"
-# True
+# ПРАВИЛЬНО:
+INSERT INTO processed_files (filename, filepath, lead_id, status, ...) VALUES ('test.wav', '/recordings/test.wav', ...);
 ```
 
 ---
 
-### E070: `docker exec ... python /scripts/run_historical_sync.py` — No such file
-**Дата**: 2026-03-09
-**Root Cause**: `/scripts/` — путь на хосте (`/root/mvp-auto-summary/scripts/`), а не внутри контейнера.
-**Fix**: Скопировать скрипт в контейнер:
-```bash
-docker cp /root/mvp-auto-summary/scripts/run_historical_sync.py \
-  mvp-auto-summary-orchestrator-1:/app/run_historical_sync.py
-docker exec ... python /app/run_historical_sync.py
+---
+
+### E046: Файл с нестандартным именем пропускается workflow
+
+**Symptom**: Загрузил файл в `/mnt/recordings/`, но workflow 01 его не обрабатывает.
+
+**Root Cause**: Имя файла не начинается с цифр — система не может определить LEAD_ID.
+
+**Fix**: Переименовать файл — добавить ID клиента в начало:
 ```
+# НЕПРАВИЛЬНО (нет цифр в начале):
+разговор_с_клиентом.mp3
+митинг_101.wav
+
+# ПРАВИЛЬНО (любые цифры в начале, дальше — что угодно):
+101_разговор_с_клиентом.mp3
+101_митинг.wav
+101_2026-02-20_10-30.mp3   ← строгий формат (опционально)
+```
+
+Workflow 01 обновлён (2026-02-20): поддерживает форматы `101_`, `101-`, `101.` в начале имени.
 
 ---
 
-### E071: tmux отсутствует на сервере
-**Дата**: 2026-03-09
-**Root Cause**: `tmux` не установлен на VPS.
-**Symptom**: `bash: line 1: tmux: command not found`
-**Workaround**: Использовать `nohup ... &` с перенаправлением в лог:
-```bash
-nohup docker exec mvp-auto-summary-orchestrator-1 python /app/run_historical_sync.py \
-  > /root/bitrix_sync.log 2>&1 &
-echo PID:$!
+---
 
-# Следить за прогрессом:
-tail -f /root/bitrix_sync.log
-```
+## Ошибки Telegram (авторизация и выгрузка чатов)
+
+> **Контекст:** Для выгрузки истории чатов используется библиотека Telethon.
+> Она работает от имени ЛИЧНОГО аккаунта (не бота) — только так можно читать старую историю переписки.
+> Нужен ОДИН рабочий Telegram-аккаунт у которого есть доступ ко всем нужным чатам.
+> Приложение (api_id/api_hash) создаётся один раз на my.telegram.org/apps.
 
 ---
 
-### E072: `ff_number` не определён при `dataset_id` уже есть в `dataset_map`
-**Дата**: 2026-03-09
-**Root Cause**: Переменная `ff_number` вычислялась только внутри `if not dataset_id:`, но использовалась в цикле по датам (`client_label = ff_number if ff_number else ...`).
-**Symptom**: `NameError: name 'ff_number' is not defined`
-**Fix**: Вынести вычисление `ff_number` **до** блока `if not dataset_id:`:
-```python
-# ПРАВИЛЬНО — всегда вычисляется:
-ff_number = _extract_ff_number(lead.get("title", "") or lead.get("name", ""))
+### E047: SMS-код при авторизации Telethon не приходит
 
-dataset_id = dataset_map.get(diffy_lead_id, "")
-if not dataset_id:
-    dataset_name = ff_number if ff_number and not diffy_lead_id.startswith("BX-LEAD-") else diffy_lead_id
-    dataset_id = dify.create_dataset(dataset_name)
-    ...
+**Symptom**: Запустил скрипт, ввёл номер телефона — код в Telegram не пришёл ни с +7, ни с 8, ни через VPN.
+
+**Root Cause**: Telegram блокирует запросы с незнакомых IP (серверы, VPN, новые устройства). Код уходит в "незавершённые попытки" вместо доставки.
+
+**Fix**: Использовать вход через QR-код:
 ```
+python list_telegram_chats.py → выбрать 1 (QR)
+Telegram на телефоне: Настройки → Устройства → Подключить устройство → навести камеру
+```
+QR-вход не зависит от IP и не требует SMS.
 
 ---
 
-## Jitsi / Recordings Errors
+### E048: QR отсканирован ("успешно" в Telegram), но скрипт не реагирует и пишет "Не удалось войти"
 
-### E016: NFS mount dropped
-```bash
-mountpoint /mnt/recordings
-mount -a
-```
+**Symptom**: Telegram на телефоне пишет "успешно", но PowerShell продолжает ждать и в итоге завершается с ошибкой.
 
-### E057: transcribe — очередь переполнена
-**Fix**: Увеличить `TRANSCRIBE_QUEUE_SIZE` и/или `TRANSCRIBE_WORKERS`.
+**Root Cause**: Старая версия скрипта (до 2026-02-20) проверяла авторизацию через `get_me()` в цикле — это не работает с QR. Нужен `qr_login.wait()`.
 
-### E058: Jibri BUSY — параллельный созвон не записывается
-**Fix**:
-```bash
-cd /opt/jitsi-meet
-docker compose -f docker-compose.yml -f jibri.yml up -d --scale jibri=2
-```
+**Fix**: Обновить скрипт до актуальной версии. Текущая версия `list_telegram_chats.py` содержит `await qr_login.wait(timeout=120)` и работает корректно.
 
 ---
 
-## Telegram (авторизация/выгрузка)
+### E049: После QR в PowerShell запрашивает пароль, в Telegram приходит "Незавершённая попытка входа"
 
-### E047: SMS-код не приходит при авторизации Telethon
-**Fix**: Использовать QR-вход: Telegram → Настройки → Устройства → Подключить устройство.
+**Symptom**: QR отсканирован, Telegram говорит "успешно", но скрипт просит ввести пароль. В Telegram приходит уведомление про незавершённую попытку с устройства "mvpsummary, Vienna, Austria".
 
-### E048: QR отсканирован, но скрипт не реагирует
-**Root Cause**: Старая версия скрипта без `await qr_login.wait(timeout=120)`.
-**Fix**: Использовать актуальный `list_telegram_chats.py`.
+**Root Cause**: На аккаунте включена двухэтапная проверка (облачный пароль). Это ОТДЕЛЬНЫЙ пароль — не код из SMS. Уведомление про "незавершённую попытку" приходит именно в этот момент — это нормально, это не взлом.
 
-### E049: Скрипт запрашивает пароль после QR
-**Root Cause**: На аккаунте включена двухэтапная проверка. Это нормально.
-**Fix**: Ввести облачный пароль. Настройки → Конфиденциальность → Двухэтапная проверка.
+**Fix**: Ввести облачный пароль в PowerShell когда скрипт его запросит.
 
-### E050: Нужно ли 5 приложений для 5 менеджеров?
-**Нет.** Один общий Telegram-аккаунт, добавленный во все чаты. Одно приложение на my.telegram.org.
+**Где посмотреть/сбросить пароль**: Telegram → Настройки → Конфиденциальность → Двухэтапная проверка.
 
-### E051: Как получить api_id и api_hash
-1. Открыть https://my.telegram.org/apps
-2. Войти через номер телефона
-3. Создать приложение: Platform = Desktop
-4. Скопировать **App api_id** и **App api_hash**
+**Если пароль забыт**: там же → "Забыл пароль" → сброс через привязанный email.
 
-### E053: Как заполнить lead_chat_mapping
+---
+
+### E050: Нужно собирать чаты у 5+ менеджеров — нужно ли 5 приложений?
+
+**Вопрос**: У нас несколько менеджеров, у каждого свои чаты с клиентами. Нужно ли каждому создавать своё приложение на my.telegram.org?
+
+**Ответ: НЕТ. Достаточно одного аккаунта и одного приложения.**
+
+**Правильная схема:**
+```
+Один рабочий Telegram-аккаунт (общий, не личный)
+    ├── Добавлен во все групповые чаты с клиентами
+    ├── Авторизован в скрипте ОДИН РАЗ
+    └── Файл mvp_session.session лежит на сервере и работает вечно
+```
+
+**Что нужно сделать:**
+1. Завести один общий рабочий Telegram-аккаунт (или использовать аккаунт руководителя)
+2. Добавить этот аккаунт во все группы с клиентами (менеджеры должны добавить его)
+3. Создать приложение на my.telegram.org/apps под этим аккаунтом
+4. Авторизоваться один раз на компьютере → скопировать `mvp_session.session` на сервер
+
+**Личный аккаунт НЕ рекомендуется** — риск случайной блокировки и личная переписка попадёт в систему.
+
+---
+
+### E051: Пошаговая инструкция — получить api_id и api_hash
+
+1. Открыть **https://my.telegram.org/apps** в браузере
+2. Ввести номер телефона аккаунта в формате `+79161234567` → нажать Next
+3. В Telegram придёт код подтверждения (в само приложение, не SMS) → ввести на сайте
+4. Заполнить форму:
+
+| Поле | Что вписать |
+|------|-------------|
+| App title | `MVP Auto-Summary` |
+| Short name | `mvpsummary` |
+| URL | оставить пустым |
+| Platform | Desktop |
+| Description | оставить пустым |
+
+5. Нажать "Create application"
+6. Скопировать **App api_id** (число, например `32782815`) и **App api_hash** (строка 32 символа)
+
+**Хранить в `.env` файле, не публиковать в git.**
+
+**Текущие credentials проекта** (рабочий аккаунт, авторизован 2026-02-20):
+```
+TELEGRAM_API_ID=32782815
+TELEGRAM_API_HASH=a4c241e64433835b4a335b62520ab005
+```
+Файл сессии: `/root/mvp-auto-summary/scripts/mvp_session.session`
+
+---
+
+### E052: Что такое файл mvp_session.session и зачем его копировать на сервер
+
+**Что это**: После первой авторизации Telethon сохраняет сессию в файл `.session` — как куки в браузере. Позволяет не вводить пароль при каждом запуске скрипта.
+
+**Где создаётся**: В папке где запускался скрипт.
+- На Windows: `C:\Users\dev\mvp-autosummary\scripts\mvp_session.session`
+- На сервере: `/root/mvp-auto-summary/scripts/mvp_session.session`
+
+**Что делать:**
+1. Запустить `list_telegram_chats.py` на своём компьютере → пройти авторизацию
+2. Через WinSCP скопировать файл на сервер:
+   - Откуда: `C:\Users\dev\mvp-autosummary\scripts\mvp_session.session`
+   - Куда: `/root/mvp-auto-summary/scripts/mvp_session.session`
+3. Все последующие запуски скриптов на сервере работают автоматически
+
+**Если файл устарел или слетел**: просто авторизоваться заново на компьютере и скопировать новый файл.
+
+---
+
+### E053: Таблица lead_chat_mapping — как связать договор с чатом
+
+**Что это**: Таблица в PostgreSQL где хранится соответствие "номер договора ↔ Telegram чат". Заполняется вручную один раз, потом используется для автоматической ежедневной выгрузки всех чатов.
+
+**Структура:**
+```sql
+lead_id       — номер договора (например '101')
+lead_name     — название клиента ('ООО Ромашка')
+chat_id       — числовой ID чата в Telegram (например -1009876543210)
+chat_username — @username группы если есть
+chat_title    — название чата как в Telegram
+chat_type     — 'group', 'supergroup', 'private'
+```
+
+**Как получить chat_id**: запустить `python list_telegram_chats.py` — выведет список всех чатов с их ID.
+
+**Как добавить запись** (в PuTTY на сервере):
 ```bash
 docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "
 INSERT INTO lead_chat_mapping (lead_id, lead_name, chat_id, chat_title, chat_type)
-VALUES ('101', 'ООО Ромашка', -1009876543210, 'ООО Ромашка', 'supergroup');
+VALUES ('101', 'ООО Ромашка', -1009876543210, 'ООО Ромашка поставки', 'supergroup');
 "
 ```
 
----
-
-## Bitrix24 + Dify автосоздание блокнотов (E073-E076)
-
-### E073: Dify датасеты не создаются — 400 Bad Request
-**Symptom**: В логах `bitrix_dataset_create_failed` с ошибкой `HTTP 400`.
-
-**Root Cause**: Код отправлял параметр `indexing_technique` при создании датасета, но Dify API его не принимает (только при создании документа).
-
-**Fix** (применён 2026-03-10):
-```python
-# В app/core/dify_api.py строка 89:
-# ДО:
-payload = {"name": name, "indexing_technique": indexing_technique}
-
-# ПОСЛЕ:
-payload = {"name": name}
+**Как посмотреть что уже есть:**
+```bash
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "SELECT * FROM lead_chat_mapping;"
 ```
 
-**Верификация**:
+**Когда таблица заполнена** — можно запустить выгрузку сразу всех чатов одной командой:
 ```bash
-grep -c 'bitrix_dataset_create_failed' /root/bitrix_sync.log
-# Должно быть 0
+python export_all_chats.py  # (скрипт будет создан после тестирования)
 ```
 
 ---
 
-### E074: Блокноты Dify называются BX-LEAD-* вместо ФФ-номеров
-**Symptom**: В Dify создаются блокноты `BX-LEAD-1035`, хотя в Битриксе есть ФФ-номер в названии.
+### E054: export_telegram_chat.py — "Cannot find any entity corresponding to"
 
-**Root Cause**: Логика извлечения ФФ-номера была только в `bitrix_summary.py` (Step 2), но `diffy_lead_id` присваивается в `bitrix_sync.py` (Step 1).
-
-**Fix** (применён 2026-03-10):
-```python
-# В app/tasks/bitrix_sync.py строка 175:
-# ДО:
-diffy_lead_id = f"BX-LEAD-{lead_id}"
-
-# ПОСЛЕ:
-ff_number = _extract_contract_number(lead.get("TITLE", ""))
-diffy_lead_id = ff_number if ff_number else f"BX-LEAD-{lead_id}"
+**Symptom**:
+```
+ОШИБКА: Cannot find any entity corresponding to "-4796144277"
 ```
 
-**Верификация** (после пересинхронизации):
-```bash
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 \
-  "docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \
-  'SELECT COUNT(*) FROM bitrix_leads WHERE diffy_lead_id LIKE \'ФФ%\';'"
-# Должно показать ~2000+ лидов с ФФ-номерами
-```
+**Root Cause**: Telethon не может найти чат по числовому ID через `get_entity()` напрямую — это работает только если сущность уже есть в локальном кэше сессии.
+
+**Fix**: Скрипт обновлён (2026-02-20) — теперь при неудаче `get_entity()` автоматически ищет чат через перебор `iter_dialogs()`. Это всегда работает для чатов в которых состоит аккаунт.
+
+Если всё равно не находит — значит аккаунт не состоит в этом чате. Проверить через `list_telegram_chats.py`.
 
 ---
 
-### E075: Поле contract_number (UF_CRM_1632960743049) пустое у всех клиентов
-**Symptom**: В БД `bitrix_leads.contract_number` у всех записей `NULL`.
+### E055: Workflow 01 — нода переименована при импорте (Mark as Transcribing1)
 
-**Root Cause**: В Битриксе поле `UF_CRM_1632960743049` не заполнено ни у одного контакта.
+**Symptom**: При запуске workflow ошибка `Invalid expression` в ноде `Mark as Transcribing1`.
 
-**Решение**: Извлекать ФФ-номер из поля `TITLE` через regex:
-```python
-# Паттерн: 'Сергей, ФФ-34' → извлекает 'ФФ-34'
-m = re.search(r'(?:FF|ФФ|фф)-?(\d+)', title, re.IGNORECASE)
-if m:
-    return f'ФФ-{m.group(1)}'
-```
+**Root Cause**: При импорте нового workflow в n8n существовал старый workflow с такой же нодой. n8n переименовал ноду добавив цифру (`1`), из-за чего сломались references в expressions других нод.
 
-**Статистика**:
-- Всего лидов: 31,005
-- С ФФ в title: ~2,044 (~6.6%)
-- С заполненным UF_CRM_*: 0
+**Fix**: Удалить старый workflow перед импортом нового:
+1. n8n UI → Workflows → найти старый Workflow 01 → три точки → Delete
+2. Затем импортировать новый JSON заново
 
 ---
 
-### E076: Контакты с договором называются LEAD-4405 вместо ФФ-4405
-**Symptom**: Контакты с договором в Dify называются `LEAD-4405`, хотя должно быть `ФФ-4405`.
+### E056: Workflow 01 — файлы зависают в статусе `transcribing`, Whisper CPU ~0%
 
-**Root Cause**: Функция `_extract_contract_number` возвращала только цифры (`return m.group(1)`), а не полный номер.
+**Symptom**: После запуска workflow все файлы попадают в статус `transcribing` в PostgreSQL, но Whisper не загружен (CPU < 1%). Последняя зелёная нода — `Has Transcript?` → False branch.
 
-**Fix** (применён 2026-03-10):
-```python
-# В app/tasks/bitrix_sync.py строка 58:
-# ДО:
-return m.group(1)  # Возвращало '4405'
+**Root Cause**: Whisper получает файл, но возвращает пустой ответ (`Unexpected end of JSON input`). Нода `Has Transcript?` уходит в False ветку → `Mark Error`. Но `Mark Error` не всегда успевает обновить статус — файл остаётся в `transcribing`.
 
-# ПОСЛЕ:
-return f'ФФ-{m.group(1)}'  # Возвращает 'ФФ-4405'
+**Возможные причины пустого ответа Whisper**:
+1. Файл повреждён или нулевой длины
+2. Кириллица в имени файла вызывает проблему при передаче через curl внутри n8n
+3. Файл слишком короткий (< 1 секунды)
+
+**Диагностика** — проверить файл напрямую:
+```bash
+curl -sS -X POST 'http://localhost:9000/asr?task=transcribe&language=ru&output=json' \
+  -F "audio_file=@/mnt/recordings/2026/02/20/2048-ФФ.webm" | head -c 500
 ```
 
-**Верификация**:
+**Fix (сброс зависших файлов)**:
 ```bash
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 \
-  "docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \
-  'SELECT diffy_lead_id, contract_number FROM bitrix_leads WHERE contract_number IS NOT NULL LIMIT 10;'"
-# Оба столбца должны быть в формате 'ФФ-XXXX'
-```
-
----
-
-## Частые операции диагностики
-
-### Проверить статус исторической синхронизации
-```bash
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 "tail -50 /root/bitrix_sync.log"
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 "ps aux | grep run_historical"
-```
-
-### Проверить что данные попали в БД
-```bash
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 \
-  "docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \
-  'SELECT COUNT(*) FROM bitrix_leads; SELECT COUNT(*) FROM bitrix_calls; SELECT COUNT(*) FROM bitrix_emails;'"
-```
-
-### Проверить orchestrator работает (jobs=6)
-```bash
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 \
-  "docker logs --tail 20 mvp-auto-summary-orchestrator-1"
-# Ожидается: scheduler_started jobs=6
-```
-
-### Перезапустить историческую синхронизацию (если упала)
-```bash
-ssh -i C:\Users\User\.ssh\mvp_server root@84.252.100.93 "
-docker cp /root/mvp-auto-summary/scripts/run_historical_sync.py \
-  mvp-auto-summary-orchestrator-1:/app/run_historical_sync.py
-nohup docker exec mvp-auto-summary-orchestrator-1 python /app/run_historical_sync.py \
-  > /root/bitrix_sync.log 2>&1 &
-echo PID:\$!
+# Удалить зависшие записи чтобы workflow обработал заново
+docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c "
+DELETE FROM processed_files WHERE status = 'transcribing';
 "
 ```
 
+**Статус**: выясняется 2026-02-20. Продолжить диагностику завтра.
+
 ---
 
-*Создано: 2026-02-18 | Обновлено: 2026-03-12 v4.2 — E069-E071 (критический баг маппинга ИСПРАВЛЕН)*
+*Document created: 2026-02-18 | Updated: 2026-02-20 — added E054 (Telethon entity search), E055 (workflow import rename), E056 (files stuck in transcribing)*
