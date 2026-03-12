@@ -80,6 +80,52 @@ def _extract_email_addresses(communications: Any) -> tuple[str, str]:
     return email_from, email_to
 
 
+def _extract_duration_from_description(description: str) -> int:
+    """
+    Extract call duration in seconds from DESCRIPTION text.
+
+    Supported formats:
+    - "23 сек." → 23
+    - "1 мин 30 сек." → 90
+    - "Длительность звонка: 23 сек." → 23
+    - "0:45" → 45
+    - "1:05" → 65
+
+    Returns 0 if duration not found.
+    """
+    if not description:
+        return 0
+
+    import re
+
+    # Pattern 1: "X мин Y сек" or "X мин. Y сек."
+    pattern_min_sec = r'(\d+)\s*мин\.?\s*(\d+)\s*сек\.?'
+    match = re.search(pattern_min_sec, description, re.IGNORECASE)
+    if match:
+        mins = int(match.group(1))
+        secs = int(match.group(2))
+        return mins * 60 + secs
+
+    # Pattern 2: "X сек" or "X сек." (just seconds)
+    pattern_sec = r'(\d+)\s*сек\.?'
+    match = re.search(pattern_sec, description, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+
+    # Pattern 3: "M:SS" or "MM:SS" time format
+    pattern_time = r'(\d+):(\d+)'
+    match = re.search(pattern_time, description)
+    if match:
+        mins = int(match.group(1))
+        secs = int(match.group(2))
+        # Only match if it looks like a duration (e.g., 0:45, 1:05, 12:30)
+        # Skip if it looks like a time (e.g., 23:59)
+        if mins < 60:  # Arbitrary threshold: durations typically < 60 mins
+            return mins * 60 + secs
+
+    return 0
+
+
 # ── Wave 2 sync functions ─────────────────────────────────────────────────────
 
 def _enrich_call_record_urls(client: Any, conn: Any, lead: dict, stats: dict) -> None:
@@ -339,10 +385,13 @@ def sync_calls(client: Any, conn: Any, leads: list[dict]) -> dict:
                     settings = activity.get("SETTINGS") or {}
                     if isinstance(settings, str):
                         settings = {}
+
+                    # Extract duration from multiple sources
                     duration = (
                         settings.get("DURATION")
                         or settings.get("CALL_DURATION")
                         or activity.get("DURATION")
+                        or _extract_duration_from_description(activity.get("DESCRIPTION", ""))
                     )
                     # Extract call_id for later voximplant enrichment
                     call_id_str = (
