@@ -1082,3 +1082,141 @@ for activity in activities:
 ---
 
 *Document created: 2026-02-18 | Updated: 2026-03-13 — added E070 (Bitrix dataset mapping bug), E071 (Bitrix calls phone_number NULL)*
+
+---
+
+### E072: MegaPBX Recordings — Connection Timeout (CRITICAL — BLOCKING)
+
+**Symptom**:
+- ❌ Невозможно скачать записи звонков для транскрибации
+- ❌ 30 звонков enriched с `record_url` из `voximplant.statistic.get`
+- ❌ `transcribe_pending_calls()` заканчивается с ошибкой timeout
+- ❌ Все попытки скачивания: `ConnectTimeoutError` к `vats528994.megapbx.ru`
+- ❌ 0 транскрибированных звонков в БД
+
+**Current State**:
+```sql
+SELECT transcript_status, COUNT(*) 
+FROM bitrix_calls
+GROUP BY transcript_status;
+
+-- no_record: 174,303 (нет URL)
+-- pending:       30 (есть URL, не скачаны)
+-- failed:        10 (timeout при скачивании)
+-- completed:      0  (НЕТ ТРАНСКРИПЦИЙ!)
+```
+
+**Root Cause**:
+```
+URL: https://vats528994.megapbx.ru/api/v2/call-records/record/2025-01-23/...
+IP:  193.201.230.178
+Ping: 100% packet loss
+HTTPS: timeout (60s)
+```
+
+**Исследование**:
+
+1. **Проверка прямого доступа:**
+```bash
+# С сервера
+ping vats528994.megapbx.ru
+# PING 193.201.230.178: 100% packet loss
+
+curl -I "https://vats528994.megapbx.ru/api/v2/..."
+# curl: (28) Connection timeout after 10001 ms
+```
+
+2. **Проверка источника URL:**
+- URL берётся из Bitrix24 → `voximplant.statistic.get`
+- Поле: `CALL_RECORD_URL` или `SRC_URL`
+- Пример:
+  ```
+  https://vats528994.megapbx.ru/api/v2/call-records/record/
+  2025-01-23/9f7f1e92-98c9-4fbd-9758-b29095ce58a0/
+  evgeniy_rodzevich_out_79099358635_2025_01_23-15_45_04.mp3
+  ```
+
+3. **Структура доступа:**
+```
+Bitrix24 → VoxImplant.statistic.get → record_url (MegaPBX)
+                                                    ↓
+                                          (нужен доступ/токен)
+                                                    ↓
+                                             Скачать файл
+                                                    ↓
+                                                Whisper
+```
+
+**Возможные причины**:
+
+1. **Firewall/Network:**
+   - IP `193.201.230.178` недоступен с сервера
+   - Возможно нужен VPN до офисной сети
+   - Или белый IP в firewall Мегафона
+
+2. **Авторизация:**
+   - Может требоваться API токен в headers
+   - Bitrix24 может иметь специальный доступ, который не передаётся
+
+3. **Временная недоступность:**
+   - Мегафон мог изменить политику доступа
+   - URL устарел (но тесты показывают что свежие 2025-2026)
+
+**Временное решение** (нет):
+
+ПРЯМЫХ АЛЬТЕРНАТИВ НЕТ — нужны записи для транскрибации.
+
+**План решения**:
+
+**Phase 1: Исследование (на завтра)**
+- [ ] Проверить доступ к megapbx.ru из офисной сети
+- [ ] Открыть URL в браузере с офисного IP
+- [ ] Найти документацию MegaPBX API
+- [ ] Проверить нужен ли API токен
+
+**Phase 2: Настройка доступа**
+
+*Option A: VPN/Proxy*
+```bash
+# Если доступен только из офисной сети
+# Добавить VPN туннель или пробросить порт
+```
+
+*Option B: API токен*
+```bash
+# Получить токен в личном кабинете MegaPBX
+# Добавить в запросы:
+headers = {'Authorization': f'Bearer {MEGAPBX_API_KEY}'}
+```
+
+*Option C: VoxImplant API*
+```python
+# Может можно скачать через VoxImplant API напрямую
+# Изучить: https://voximplant.com/docs/references/httpapi/
+```
+
+**Phase 3: Тестирование**
+```python
+# После настройки доступа
+stats = transcribe_pending_calls(db, transcribe_url, limit=5)
+# Ожидается: transcribed=5, failed=0
+```
+
+**Files affected**:
+- `app/tasks/bitrix_summary.py:transcribe_pending_calls()` — скачивание записей
+- `docs/MEGAPBX_RESEARCH.md` — план исследования
+
+**Expected result**:
+```
+-- completed:  100+  (транскрибировано)
+-- pending:      0
+-- failed:       0
+```
+
+**Статус**: ❌ BLOCKING — нужна помощь пользователя с доступом к MegaPBX
+
+**Связанные ошибки**:
+- E071 (phone_number NULL) — FIXED, enrichment работает
+- E073 (будет добавлена) — нет transcript_text в саммари
+
+---
