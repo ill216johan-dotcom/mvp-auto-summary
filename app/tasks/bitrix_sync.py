@@ -350,21 +350,31 @@ def sync_calls(client: Any, conn: Any, leads: list[dict]) -> dict:
                         or settings.get("CALL_UUID")
                         or ""
                     )
+                    # Extract phone number from COMMUNICATIONS (more reliable than voximplant)
+                    communications = activity.get("COMMUNICATIONS") or []
+                    phone_number = ""
+                    if communications and len(communications) > 0:
+                        comm = communications[0]
+                        if comm.get("TYPE") == "PHONE":
+                            phone_number = comm.get("VALUE") or ""
+
                     cur = conn.cursor()
                     try:
                         cur.execute(
                             """
                             INSERT INTO bitrix_calls
                                 (bitrix_activity_id, bitrix_call_id, bitrix_lead_id, diffy_lead_id,
-                                 direction, call_date, responsible_id, responsible_name,
+                                 direction, phone_number, call_date, responsible_id, responsible_name,
                                  call_duration, transcript_status)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'no_record')
-                            ON CONFLICT (bitrix_activity_id) DO NOTHING
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'no_record')
+                            ON CONFLICT (bitrix_activity_id) DO UPDATE SET
+                                phone_number = EXCLUDED.phone_number
                             """,
                             (
                                 activity_id, call_id_str or None,
                                 lead["bitrix_lead_id"], lead["diffy_lead_id"],
                                 int(activity.get("DIRECTION") or 0),
+                                phone_number,
                                 _parse_datetime(activity.get("START_TIME")),
                                 int(activity.get("RESPONSIBLE_ID") or 0),
                                 "",
