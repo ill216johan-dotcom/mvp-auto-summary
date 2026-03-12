@@ -957,4 +957,128 @@ DELETE FROM processed_files WHERE status = 'transcribing';
 
 ---
 
-*Document created: 2026-02-18 | Updated: 2026-02-20 — added E054 (Telethon entity search), E055 (workflow import rename), E056 (files stuck in transcribing)*
+## Bitrix Integration Errors
+
+### E070: Bitrix datasets stored in wrong table (CRITICAL — FIXED)
+
+**Symptom**:
+- Датасеты создавались для каждого клиента
+- Они сохранялись в `lead_chat_mapping.dify_dataset_id`
+- Но должны были в `bitrix_leads.dify_dataset_id`
+- Результат: система не могла находить нужные датасеты
+
+**Root Cause**: Функция `db.get_dataset_map()` возвращала маппинг из таблицы `lead_chat_mapping` (для Telegram чатов), но Bitrix клиенты использовали ту же функцию.
+
+**Fix**: Разделить функции:
+- `db.get_dataset_map()` → для Telegram чатов (старое, backward compatibility)
+- `db.get_bitrix_dataset_map()` → для Bitrix лидов/контактов (новое)
+- `db.save_bitrix_dataset_mapping()` → сохранять в `bitrix_leads`
+
+**Migration**: `scripts/migrate_fix_bitrix_mapping.sql`
+- Перенес 4,154 датасетов из `lead_chat_mapping` → `bitrix_leads`
+- Удалил 3,366 некорректных записей
+- Применён: 2026-03-12
+
+**Verification**: Фаза 3 тест показала что датасеты создаются в правильной таблице.
+
+**Статус**: ✅ ИСПРАВЛЕНО (Phase 1, commit f458bc1)
+
+---
+
+### E071: Bitrix calls — phone_number is NULL (CRITICAL — FIXED)
+
+**Symptom**:
+- Звонки синхронизировались из Битрикса (66 штук для ФФ-4405)
+- Но все `phone_number` были NULL в таблице `bitrix_calls`
+- Невозможно определить какой номер звонил
+- Отсутствует важная бизнес-информация
+
+**Root Cause**:
+
+1. **Ожидалось enrichment из voximplant**:
+   - Код вызывал `voximplant.statistic.get` для получения `CALL_ID` и `PHONE_NUMBER`
+   - Но для старых звонков (до июня 2025) `SETTINGS.CALL_ID` пустой
+   - Связь между activity и voximplant терялась → enrichment не работал
+
+2. **Телефон был доступен в activity**:
+   - API `crm.activity.list` возвращает `COMMUNICATIONS` массив
+   - `COMMUNICATIONS[0].VALUE` содержал номер телефона
+   - Но код не извлекал его — ожидал voximplant
+
+**Исследование** (ФФ-4405, 66 звонков):
+
+```bash
+# Прямой запрос к Bitrix API:
+curl -X POST "https://bitrix24.ff-platform.ru/rest/1/.../crm.activity.list" \
+  -d '{"filter":{"OWNER_TYPE_ID":3,"OWNER_ID":5723,"TYPE_ID":2}}'
+
+# Ответ:
+{
+  "ID": "150513",
+  "TYPE_ID": "2",
+  "SETTINGS": [],           # ПУСТОЙ! CALL_ID здесь нет
+  "COMMUNICATIONS": [
+    {
+      "TYPE": "PHONE",
+      "VALUE": "+79135379385"   # ТЕЛЕФОН ЗДЕСЬ!
+    }
+  ]
+}
+```
+
+**Fix** (реализовано в коммитах `2a90924`, `f4858dc`):
+
+```python
+# Извлекать телефон из COMMUNICATIONS (PRIMARY SOURCE)
+communications = activity.get("COMMUNICATIONS") or []
+phone_number = ""
+if communications and len(communications) > 0:
+    comm = communications[0]
+    if comm.get("TYPE") == "PHONE":
+        phone_number = comm.get("VALUE") or ""
+
+# Fallback: enrichment из voximplant (SECONDARY SOURCE)
+# Работает только для новых звонков (после июня 2025)
+```
+
+**SQL Changes**:
+```sql
+-- Добавлено в INSERT statement
+INSERT INTO bitrix_calls (... phone_number ...)
+VALUES (... , %s , ...)
+
+-- Добавлен enrichment при confict (для обновления существующих)
+ON CONFLICT (bitrix_activity_id) DO UPDATE SET
+    phone_number = EXCLUDED.phone_number
+```
+
+**Результат после исправления** (ФФ-4405):
+```
+phone_number  | COUNT
+--------------+-------
+NULL          |     0  ✅
++79099358635   |    25  ✅
++79135379385   |    41  ✅
+```
+
+**Workaround для существующих данных**:
+```python
+# Если ON CONFLICT не сработал - прямой UPDATE
+for activity in activities:
+    phone = extract_phone_from_communications(activity)
+    cur.execute(
+        "UPDATE bitrix_calls SET phone_number = %s WHERE bitrix_activity_id = %s",
+        (phone, activity["ID"])
+    )
+```
+
+**Дата обнаружения**: 2026-03-13 00:20
+**Дата исправления**: 2026-03-13 00:27
+**Статус**: ✅ ИСПРАВЛЕНО (commits 2a90924, f4858dc)
+**Test клиент**: ФФ-4405 (Алексей, 66 звонков, 2 номера телефона)
+
+**Документация**: `docs/BITRIX_CALLS_RESEARCH.md` — полное исследование проблемы
+
+---
+
+*Document created: 2026-02-18 | Updated: 2026-03-13 — added E070 (Bitrix dataset mapping bug), E071 (Bitrix calls phone_number NULL)*

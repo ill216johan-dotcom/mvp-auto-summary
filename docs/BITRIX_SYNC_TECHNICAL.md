@@ -105,17 +105,96 @@
 
 ## Обработка звонков
 
+### ⚠️ ВАЖНО: Проблема phone_number (ИСПРАВЛЕНО 2026-03-13)
+
+**Симптомы:**
+- Звонки синхронизировались, но `phone_number` был NULL
+- Невозможно определить какой номер звонил
+- Пропущены важные бизнес-данные
+
+**Корневая причина:**
+
+1. **`SETTINGS.CALL_ID` пустой** для старых звонков (до июня 2025)
+   - API возвращает: `"SETTINGS": []`
+   - VoxImplant enrichment не работал (не было связи activity ↔ voximplant)
+
+2. **Телефон был в `COMMUNICATIONS[0].VALUE`**
+   - Код не извлекал его из `crm.activity.list`
+   - Ожидал enrichment из voximplant (который не работал)
+
+**Исследование (ФФ-4405, 66 звонков):**
+
+```bash
+# API возвращает:
+curl -X POST "https://bitrix24.ff-platform.ru/rest/1/.../crm.activity.list" \
+  -d '{"filter":{"OWNER_TYPE_ID":3,"OWNER_ID":5723,"TYPE_ID":2}}'
+
+# Ответ:
+{
+  "ID": "150513",
+  "TYPE_ID": "2",
+  "SETTINGS": [],  # ПУСТОЙ!
+  "COMMUNICATIONS": [
+    {
+      "TYPE": "PHONE",
+      "VALUE": "+79135379385"  # ТЕЛЕФОН ЗДЕСЬ!
+    }
+  ]
+}
+```
+
+**Решение (реализовано в коммитах 2a90924, f4858dc):**
+
+```python
+# Извлечь телефон из COMMUNICATIONS
+communications = activity.get("COMMUNICATIONS") or []
+phone_number = ""
+if communications and len(communications) > 0:
+    comm = communications[0]
+    if comm.get("TYPE") == "PHONE":
+        phone_number = comm.get("VALUE") or ""
+```
+
+**Результат для ФФ-4405:**
+```
+До исправления:
+phone_number | COUNT
+-------------+-------
+NULL         |    66
+
+После исправления:
+phone_number  | COUNT
+--------------+-------
++79099358635  |    25
++79135379385  |    41
+```
+
+**Технические детали:**
+
+1. **Primary Source:** `activity.COMMUNICATIONS[0].VALUE`
+   - Надёжный источник для ВСЕХ звонков
+   - Доступен в `crm.activity.list`
+
+2. **Secondary Source:** `voximplant.statistic.get.PHONE_NUMBER`
+   - Fallback для enrichment
+   - Работает только для новых звонков (после июня 2025)
+
+3. **ON CONFLICT LIMITATION:**
+   - `ON CONFLICT DO UPDATE` не обновляет NULL → value
+   - Требуется отдельный шаг enrichment для существующих записей
+
 ### Типы звонков
 
-| Период | Обработка | Транскрибация |
-|--------|-----------|---------------|
-| До июня 2025 | Кол-во ❌ | ❌ Записи удалены |
-| После июня 2025 | Транскрипция ✅ | ✅ Whisper |
+| Период | Обработка | Транскрибация | phone_number |
+|--------|-----------|---------------|---------------|
+| До июня 2025 | Кол-во ✅ | ❌ Записи удалены | ✅ COMMUNICATIONS |
+| После июня 2025 | Транскрипция ✅ | ✅ Whisper | ✅ COMMUNICATIONS + voximplant |
 
 ### API Bitrix
 
 - **Owner Type:** `3` = CONTACT, `1` = LEAD
 - **Activity Type:** `TYPE_ID=2` = Meetings (содержит звонки)
+- **Phone Number:** `COMMUNICATIONS[0].VALUE` (TYPE=PHONE)
 - **Запись:** `voximplant.statistic.get` → `record_url`
 
 ---
