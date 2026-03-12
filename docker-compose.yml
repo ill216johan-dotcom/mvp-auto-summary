@@ -43,6 +43,11 @@ services:
       - TRANSCRIBE_URL=http://transcribe:9001
       # --- Summaries ---
       - SUMMARIES_BASE_URL=${SUMMARIES_BASE_URL:-http://84.252.100.93:8181}
+      # --- Bitrix24 CRM ---
+      - BITRIX_WEBHOOK_URL=${BITRIX_WEBHOOK_URL:-}
+      - BITRIX_CONTRACT_FIELD=${BITRIX_CONTRACT_FIELD:-UF_CRM_1632960743049}
+      - BITRIX_SYNC_HOUR=${BITRIX_SYNC_HOUR:-22}
+      - BITRIX_SYNC_ENABLED=${BITRIX_SYNC_ENABLED:-True}
       # --- Schedule ---
       - TIMEZONE=${TIMEZONE:-Europe/Moscow}
     volumes:
