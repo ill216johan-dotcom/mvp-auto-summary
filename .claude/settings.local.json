@@ -1,7 +1,24 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git clone:*)"
+      "Bash(git clone:*)",
+      "WebSearch",
+      "Bash(python test_megapbx_access.py)",
+      "Bash(pip install:*)",
+      "Bash(python test_megapbx_endpoints.py)",
+      "Bash(python test_megapbx_web.py)",
+      "Bash(scp -o StrictHostKeyChecking=no get_record_url.py root@84.252.100.93:/tmp/)",
+      "Bash(ssh -o StrictHostKeyChecking=no root@84.252.100.93 \"docker exec mvp-auto-summary-orchestrator-1 python /tmp/get_record_url.py\")",
+      "Bash(ssh -o StrictHostKeyChecking=no root@84.252.100.93 \"docker cp /tmp/get_record_url.py mvp-auto-summary-orchestrator-1:/tmp/get_record_url.py && docker exec mvp-auto-summary-orchestrator-1 python /tmp/get_record_url.py\")",
+      "Bash(python test_bitrix_api.py)",
+      "Bash(ssh -o StrictHostKeyChecking=no root@84.252.100.93 \"cat /root/mvp-auto-summary/.env | grep BITRIX_WEBHOOK_URL\")",
+      "Bash(ssh -o StrictHostKeyChecking=no root@84.252.100.93 \"docker exec mvp-auto-summary-postgres-1 psql -U n8n -d postgres -c \\\\\"\\\\\\\\l\\\\\"\")",
+      "Bash(ssh -o StrictHostKeyChecking=no root@84.252.100.93 \"docker exec mvp-auto-summary-postgres-1 psql -U n8n -d n8n -c \\\\\"\\\\\\\\dt\\\\\"\")",
+      "Bash(python test_megapbx_recording.py)",
+      "Bash(python test_bitrix_file_download.py)",
+      "Bash(python test_bitrix_activity.py)",
+      "Bash(python test_bitrix_activity_v2.py)",
+      "Bash(python test_specific_activity.py)"
     ]
   }
 }

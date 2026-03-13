@@ -26,6 +26,7 @@ from app.core.logger import get_logger, setup_logging
 from app.core.telegram_api import TelegramSender
 from app.bot.handler import BotService
 from app.scheduler import create_scheduler
+from app.webhook_server import WebhookServer
 
 log = get_logger("main")
 
@@ -64,6 +65,18 @@ def main() -> None:
     scheduler.start()
     log.info("scheduler_started", jobs=len(scheduler.get_jobs()))
 
+    # ── Start Bitrix24 webhook server (new calls → instant transcription) ──
+    webhook_server: WebhookServer | None = None
+    if settings.bitrix_sync_enabled and settings.bitrix_webhook_url:
+        webhook_server = WebhookServer(
+            db=db,
+            transcribe_url=settings.transcribe_url,
+            bitrix_webhook_url=settings.bitrix_webhook_url,
+            port=settings.webhook_port,
+            whisper_url=settings.whisper_url,
+        )
+        webhook_server.start()
+
     # ── Start Telegram bot (WF04) — blocking ──────────────────
     bot = BotService(
         token=settings.telegram_bot_token,
@@ -76,6 +89,8 @@ def main() -> None:
     def shutdown(signum, frame):
         log.info("shutdown_signal_received", signal=signum)
         scheduler.shutdown(wait=False)
+        if webhook_server:
+            webhook_server.stop()
         llm.close()
         telegram.close()
         dify.close()

@@ -5,38 +5,33 @@
 
 ---
 
-## 1. Яндекс SpeechKit (STT) — ❗ ОТКЛЮЧЕН
+## 1. Whisper (STT) — Активный провайдер
 
-> ⚠️ **SpeechKit отключён с 2026-03-01**. Текущий STT = Whisper self-hosted (см. секцию 10).
+> ⚠️ **SpeechKit и AssemblyAI отключены**. Используем self-hosted faster-whisper.
 
-**Docs**: https://yandex.cloud/ru/docs/speechkit/stt/api/transcribation  
-**Используется через**: `transcribe` service (STT_PROVIDER=speechkit)  
-**Режим**: синхронное распознавание по чанкам 25 сек
+**Endpoint:** `POST {WHISPER_URL}/v1/audio/transcriptions`  
+Где `WHISPER_URL` по умолчанию `http://whisper:8000` (внутри docker сети).
 
-### Endpoint
+### Request
+Мы используем прямой вызов Whisper API, минуя старый адаптер `transcribe:9001` (т.к. он не поддерживал multipart/form-data загрузку).
 
-```
-POST https://stt.api.cloud.yandex.net/speech/v1/stt:recognize
-  ?lang=ru-RU&format=oggopus&sampleRateHertz=16000
-Authorization: Api-Key {YANDEX_API_KEY}
-Content-Type: audio/ogg
-
-<binary audio data>
+```bash
+curl -X POST http://whisper:8000/v1/audio/transcriptions \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@audio.mp3" \
+  -F "language=ru"
 ```
 
-### Поддерживаемые форматы
-
-| Формат | Конвертация |
-|--------|-------------|
-| WEBM (Jibri) | ffmpeg → OGG/Opus 16kHz mono → чанки по 25 сек |
-| MP3 | ffmpeg → OGG/Opus |
-| WAV | ffmpeg → OGG/Opus |
-
-### Переменные окружения
-
+### Response
+```json
+{
+  "text": "Транскрибированный текст разговора..."
+}
 ```
-YANDEX_API_KEY=AQVNxxxxxxxxxxxxxxxx
-```
+
+**Особенности:**
+- Работает на CPU. Транскрибация занимает ~1.3x от реальной длительности аудио.
+- Таймаут в Python-клиенте увеличен до 900 секунд (15 минут), чтобы не прерывать длинные звонки.
 
 ---
 
@@ -448,3 +443,25 @@ WHISPER_MODEL=medium
 ---
 
 *Обновлено: 2026-03-02 — LLM = Claude/z.ai (Anthropic API), STT = Whisper medium self-hosted, transcribe с Strategy Pattern*
+
+---
+
+## 11. Bitrix24 Webhook Server (Входящий)
+
+**Endpoint:** `POST http://84.252.100.93:8009/`  
+**Назначение:** Приём событий от Bitrix24 о завершении звонков (событие `OnVoximplantCallEnd`).
+
+### Request от Bitrix24 (application/x-www-form-urlencoded)
+```
+event=ONVOXIMPLANTCALLEND
+&data[CALL_ID]=externalCall.xxx
+&data[CALL_DURATION]=120
+&data[PHONE_NUMBER]=+79991234567
+&data[RECORD_FILE_ID]=341880
+```
+
+### Логика обработки
+1. Сервер находит звонок в `bitrix_calls` (по `CALL_ID` или `CRM_ACTIVITY_ID`).
+2. Обогащает запись `record_file_id`.
+3. Сразу запускает скачивание (через `disk.file.get`) и транскрибацию (в Whisper).
+4. **Важно:** Поскольку `event.bind` требует OAuth-авторизации, а у нас только webhook-токен, на данный момент сервер просто запущен, но событие в Битриксе не зарегистрировано. Вместо этого используется polling каждые 30 минут (`poll_new_recordings`).

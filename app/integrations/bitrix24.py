@@ -131,11 +131,26 @@ class Bitrix24Client:
         params: dict[str, Any] = {
             "select": ["ID", "CALL_ID", "CRM_ENTITY_TYPE", "CRM_ENTITY_ID",
                        "CALL_DURATION", "CALL_START_DATE", "CALL_TYPE",
-                       "PORTAL_USER_ID", "PHONE_NUMBER", "CALL_RECORD_URL", "SRC_URL"],
+                       "PORTAL_USER_ID", "PHONE_NUMBER", "CALL_RECORD_URL", "SRC_URL",
+                       "RECORD_FILE_ID"],
         }
         if filter:
             params["filter"] = filter
         return self.call_list("voximplant.statistic.get", params)
+
+    def get_disk_download_url(self, file_id: int) -> str | None:
+        """
+        Get a temporary download URL for a file stored in Bitrix24 Disk.
+        Requires 'disk' scope in the webhook.
+        Returns the DOWNLOAD_URL string, or None if not found.
+        """
+        try:
+            data = self.call("disk.file.get", {"id": file_id})
+            result = data.get("result", {})
+            return result.get("DOWNLOAD_URL")
+        except Exception as e:
+            log.warning("bitrix_disk_file_get_failed", file_id=file_id, error=str(e))
+            return None
 
     def get_timeline_comments(self, entity_type: str, entity_id: int) -> list[dict]:
         """Get timeline comments for a lead or contact.

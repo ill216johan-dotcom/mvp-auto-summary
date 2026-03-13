@@ -1149,18 +1149,24 @@ Bitrix24 → VoxImplant.statistic.get → record_url (MegaPBX)
 
 **Возможные причины**:
 
-1. **Firewall/Network:**
-   - IP `193.201.230.178` недоступен с сервера
-   - Возможно нужен VPN до офисной сети
-   - Или белый IP в firewall Мегафона
+1. **MegaPBX API не существует:**
+   - `/api/v2/*` endpoints возвращают **501 Not Implemented**
+   - MegaPBX НЕ предоставляет REST API для скачивания записей
+   - Все endpoints возвращают HTML веб-интерфейса, не JSON
 
-2. **Авторизация:**
-   - Может требоваться API токен в headers
-   - Bitrix24 может иметь специальный доступ, который не передаётся
+2. **Bitrix24 API не возвращает URL:**
+   - `voximplant.statistic.get` возвращает **289,612 звонков**
+   - **0 из них имеют CALL_RECORD_URL или SRC_URL**
+   - API изменился, URL больше не приходят
 
-3. **Временная недоступность:**
-   - Мегафон мог изменить политику доступа
-   - URL устарел (но тесты показывают что свежие 2025-2026)
+3. **CRM Activity не содержит файлов:**
+   - `crm.activity.get` → `PROVIDER_DATA`: None
+   - `crm.activity.get` → `FILES`: None
+   - Нет ссылок на файлы записей
+
+4. **Метод telephony.call.download не существует:**
+   - API возвращает **404 Not Found**
+   - Error: "Method not found!"
 
 **Временное решение** (нет):
 
@@ -1168,55 +1174,86 @@ Bitrix24 → VoxImplant.statistic.get → record_url (MegaPBX)
 
 **План решения**:
 
-**Phase 1: Исследование (на завтра)**
-- [ ] Проверить доступ к megapbx.ru из офисной сети
-- [ ] Открыть URL в браузере с офисного IP
-- [ ] Найти документацию MegaPBX API
-- [ ] Проверить нужен ли API токен
+**✅ Phase 1: Исследование — ЗАВЕРШЕНО (2026-03-13)**
 
-**Phase 2: Настройка доступа**
+Проверенные методы (все ❌):
+- [x] MegaPBX REST API — 501 Not Implemented
+- [x] Bitrix24 `voximplant.statistic.get` — нет URL
+- [x] `crm.activity.get` — нет файлов
+- [x] `telephony.call.download` — метод не существует
+- [x] Basic Auth к record_url — 404
+- [x] Web-скрейпинг MegaPBX — только HTML
 
-*Option A: VPN/Proxy*
+**⏸️ Phase 2: Выбор решения (нужен user input)**
+
+**Option A: Webhook для новых звонков**
 ```bash
-# Если доступен только из офисной сети
-# Добавить VPN туннель или пробросить порт
+# VoxImplant → Webhook → Наш сервер → Сохранить MP3
+# Плюсы: Работает для будущих звонков
+# Минусы: Не поможет для исторических данных
 ```
 
-*Option B: API токен*
+**Option B: Network tab исследование**
 ```bash
-# Получить токен в личном кабинете MegaPBX
-# Добавить в запросы:
-headers = {'Authorization': f'Bearer {MEGAPBX_API_KEY}'}
+# Зайти в Битрикс → Звонки → Воспроизвести
+# DevTools → Network tab → Найти реальный MP3 URL
+# Ожидание: https://cdn.voximplant.com/...
 ```
 
-*Option C: VoxImplant API*
-```python
-# Может можно скачать через VoxImplant API напрямую
-# Изучить: https://voximplant.com/docs/references/httpapi/
+**Option C: Ручное скачивание (POC)**
+```bash
+# Скачать 5-10 записей вручную
+# Загрузить на сервер через scp
+# Протестировать: MP3 → Whisper → Summary → RAG
 ```
 
-**Phase 3: Тестирование**
-```python
-# После настройки доступа
-stats = transcribe_pending_calls(db, transcribe_url, limit=5)
-# Ожидается: transcribed=5, failed=0
+**Option D: Работать без транскрибации**
+```bash
+# Генерировать саммари только с метаданными
+# (время, длительность, номер телефона)
+# RAG работает только по метаданным
 ```
 
 **Files affected**:
 - `app/tasks/bitrix_summary.py:transcribe_pending_calls()` — скачивание записей
+- `docs/TRANSCRIPTION_PROBLEM.md` — детальное исследование
 - `docs/MEGAPBX_RESEARCH.md` — план исследования
 
 **Expected result**:
 ```
--- completed:  100+  (транскрибировано)
--- pending:      0
--- failed:       0
+-- ДО:
+completed:   0
+with_text:   0
+
+-- ПОСЛЕ (минимум):
+completed:   5+
+with_text:   5+
+
+-- ИДЕАЛ:
+completed:   1000+
+with_text:   1000+
 ```
 
-**Статус**: ❌ BLOCKING — нужна помощь пользователя с доступом к MegaPBX
+**Статус**: 🔴 CRITICAL BLOCKER — **требуется решение от пользователя**
+
+**Детали**: 📄 [`docs/TRANSCRIPTION_PROBLEM.md`](docs/TRANSCRIPTION_PROBLEM.md)
 
 **Связанные ошибки**:
-- E071 (phone_number NULL) — FIXED, enrichment работает
+- E071 (phone_number NULL) — ✅ FIXED, enrichment работает
 - E073 (будет добавлена) — нет transcript_text в саммари
 
 ---
+
+## E073: Webhook Event.bind requires OAuth
+**Причина**: Попытка выполнить `event.bind` для `OnVoximplantCallEnd` с использованием webhook-токена Битрикс24.
+**Проявление**: Ошибка `WRONG_AUTH_TYPE: Current authorization type is denied for this method`.
+**Решение**:
+- Webhook-токены Битрикс24 не имеют права регистрировать события через API (в отличие от полноценных OAuth приложений).
+- Временно используется фоновый опрос `poll_new_recordings` каждые 30 минут как альтернатива реальному времени.
+
+## E074: CPU Whisper Timeout
+**Причина**: Очень долгая транскрибация длинных файлов на CPU, превышающая HTTP таймаут.
+**Проявление**: Ошибка таймаута при запросе к `whisper:8000/v1/audio/transcriptions`, звонок падает со статусом `failed`.
+**Решение**:
+- Таймаут в Python скриптах (`bitrix_summary.py` и `webhook_server.py`) увеличен с 300 до 900 секунд (15 минут).
+- Если требуется транскрибация больших файлов (>10-15 минут), может потребоваться переход на GPU инстанс.

@@ -183,19 +183,27 @@ phone_number  | COUNT
    - `ON CONFLICT DO UPDATE` не обновляет NULL → value
    - Требуется отдельный шаг enrichment для существующих записей
 
-### Типы звонков
+### Типы звонков и транскрибация (РЕШЕНО 2026-03-13)
+
+**Проблема:** Изначально система пыталась использовать прямые URL `vats528994.megapbx.ru`, но они оказались заблокированы/недоступны (404/timeout).
+
+**Решение:**
+1. Использовать `voximplant.statistic.get` с `SELECT=["RECORD_FILE_ID"]`.
+2. Скачивать файлы через внутреннее API диска: `disk.file.get?id=RECORD_FILE_ID` -> получение временного `DOWNLOAD_URL`.
+3. Скачивать реальный MP3 и отправлять напрямую в Whisper (`/v1/audio/transcriptions`).
 
 | Период | Обработка | Транскрибация | phone_number |
 |--------|-----------|---------------|---------------|
-| До июня 2025 | Кол-во ✅ | ❌ Записи удалены | ✅ COMMUNICATIONS |
-| После июня 2025 | Транскрипция ✅ | ✅ Whisper | ✅ COMMUNICATIONS + voximplant |
+| До июня 2025 | Кол-во ✅ | ❌ Записи удалены Битриксом | ✅ COMMUNICATIONS |
+| После июня 2025 | Транскрипция ✅ | ✅ Whisper (через Disk API) | ✅ COMMUNICATIONS + voximplant |
 
-### API Bitrix
+### API Bitrix для звонков
 
 - **Owner Type:** `3` = CONTACT, `1` = LEAD
 - **Activity Type:** `TYPE_ID=2` = Meetings (содержит звонки)
 - **Phone Number:** `COMMUNICATIONS[0].VALUE` (TYPE=PHONE)
-- **Запись:** `voximplant.statistic.get` → `record_url`
+- **Запись:** `voximplant.statistic.get` → `RECORD_FILE_ID`
+- **Скачивание:** `disk.file.get` → `DOWNLOAD_URL`
 
 ---
 

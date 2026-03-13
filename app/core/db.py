@@ -620,23 +620,28 @@ class Database:
                 for r in cur.fetchall()
             ]
 
-    def get_calls_pending_transcription(self) -> list[dict[str, Any]]:
-        """Get calls with record_url that haven't been transcribed yet."""
+    def get_calls_pending_transcription(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Get calls with record_file_id or record_url that haven't been transcribed yet.
+        Prefers record_file_id (Bitrix Disk) over record_url (MegaPBX direct)."""
         with self.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, bitrix_activity_id, diffy_lead_id, record_url
+                SELECT id, bitrix_activity_id, diffy_lead_id, record_url, record_file_id
                 FROM bitrix_calls
                 WHERE transcript_status = 'pending'
-                  AND record_url IS NOT NULL
-                ORDER BY call_date DESC
-                LIMIT 20
-                """
+                  AND (record_file_id IS NOT NULL OR record_url IS NOT NULL)
+                ORDER BY
+                    record_file_id IS NOT NULL DESC,  -- prefer file_id over url
+                    call_date DESC
+                LIMIT %s
+                """,
+                (limit,),
             )
             return [
                 {
                     "id": r[0], "bitrix_activity_id": r[1],
                     "diffy_lead_id": r[2], "record_url": r[3],
+                    "record_file_id": r[4],
                 }
                 for r in cur.fetchall()
             ]
@@ -653,6 +658,54 @@ class Database:
                 WHERE id = %s
                 """,
                 (transcript_text, status, call_id),
+            )
+
+    def get_call_by_bitrix_ids(
+        self,
+        bitrix_call_id: str | None = None,
+        bitrix_activity_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Find a call row by bitrix_call_id or bitrix_activity_id."""
+        with self.cursor() as cur:
+            if bitrix_call_id:
+                cur.execute(
+                    "SELECT id, bitrix_activity_id, diffy_lead_id, record_url, record_file_id "
+                    "FROM bitrix_calls WHERE bitrix_call_id = %s LIMIT 1",
+                    (bitrix_call_id,),
+                )
+            elif bitrix_activity_id:
+                cur.execute(
+                    "SELECT id, bitrix_activity_id, diffy_lead_id, record_url, record_file_id "
+                    "FROM bitrix_calls WHERE bitrix_activity_id = %s LIMIT 1",
+                    (bitrix_activity_id,),
+                )
+            else:
+                return None
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0], "bitrix_activity_id": row[1],
+                "diffy_lead_id": row[2], "record_url": row[3], "record_file_id": row[4],
+            }
+
+    def update_call_record_info(
+        self,
+        call_id: int,
+        record_file_id: int | None,
+        record_url: str | None,
+    ) -> None:
+        """Update record_file_id, record_url and set transcript_status='pending'."""
+        with self.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bitrix_calls
+                SET record_file_id    = COALESCE(%s, record_file_id),
+                    record_url        = COALESCE(%s, record_url),
+                    transcript_status = 'pending'
+                WHERE id = %s
+                """,
+                (record_file_id, record_url, call_id),
             )
 
     def get_bitrix_data_for_summary(

@@ -70,12 +70,13 @@ class DifyClient:
         log.info("dify_doc_created", dataset_id=dataset_id, doc_id=doc_id, name=name)
         return doc_id
 
-    def create_dataset(self, name: str) -> str:
+    def create_dataset(self, name: str, description: str = "") -> str:
         """
         Create a new Dify dataset (Knowledge Base) and return its ID.
 
         Args:
             name: Dataset name (e.g. "LEAD-42" or "BX-LEAD-100").
+            description: Optional description for the dataset.
 
         Returns:
             New dataset UUID string, or empty string on failure.
@@ -86,6 +87,9 @@ class DifyClient:
 
         url = f"{self.base_url}/v1/datasets"
         payload = {"name": name}
+        if description:
+            payload["description"] = description
+
         response = self._client.post(
             url,
             json=payload,

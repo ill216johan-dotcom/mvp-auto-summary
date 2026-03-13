@@ -67,6 +67,11 @@ class Settings(BaseSettings):
         default="http://transcribe:9001",
         alias="TRANSCRIBE_URL",
     )
+    # Direct Whisper URL for multipart /v1/audio/transcriptions call
+    whisper_url: str = Field(
+        default="http://whisper:8000",
+        alias="WHISPER_URL",
+    )
 
     # ── Paths ─────────────────────────────────────────────────
     recordings_dir: str = Field(default="/recordings", alias="RECORDINGS_DIR")
@@ -89,6 +94,9 @@ class Settings(BaseSettings):
     bitrix_contract_field: str = Field(default="", alias="BITRIX_CONTRACT_FIELD")
     bitrix_sync_hour: int = Field(default=22, alias="BITRIX_SYNC_HOUR")
     bitrix_sync_enabled: bool = Field(default=True, alias="BITRIX_SYNC_ENABLED")
+
+    # ── Bitrix24 event webhook receiver ───────────────────────
+    webhook_port: int = Field(default=8009, alias="WEBHOOK_PORT")
 
 def get_settings() -> Settings:
     """Create and return settings instance (cached at module level)."""

@@ -48,8 +48,12 @@ services:
       - BITRIX_CONTRACT_FIELD=${BITRIX_CONTRACT_FIELD:-UF_CRM_1632960743049}
       - BITRIX_SYNC_HOUR=${BITRIX_SYNC_HOUR:-22}
       - BITRIX_SYNC_ENABLED=${BITRIX_SYNC_ENABLED:-True}
+      # --- Bitrix24 event webhook receiver ---
+      - WEBHOOK_PORT=${WEBHOOK_PORT:-8009}
       # --- Schedule ---
       - TIMEZONE=${TIMEZONE:-Europe/Moscow}
+    ports:
+      - "${WEBHOOK_PORT:-8009}:8009"
     volumes:
       - /mnt/recordings:/recordings:ro
       - summaries_data:/summaries

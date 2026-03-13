@@ -135,7 +135,7 @@ def create_scheduler(
 
     # ── Schedule: Bitrix24 CRM sync ───────────────────────────
     if settings.bitrix_sync_enabled and settings.bitrix_webhook_url:
-        from app.tasks.bitrix_sync import run_bitrix_sync
+        from app.tasks.bitrix_sync import run_bitrix_sync, poll_new_recordings
 
         scheduler.add_job(
             lambda: run_bitrix_sync(
@@ -145,12 +145,29 @@ def create_scheduler(
                 webhook_url=settings.bitrix_webhook_url,
                 contract_field=settings.bitrix_contract_field,
                 transcribe_url=settings.transcribe_url,
+                whisper_url=settings.whisper_url,
             ),
             CronTrigger(hour=settings.bitrix_sync_hour, minute=0),
             id="bitrix_sync",
             name="Bitrix24: Daily CRM sync",
             max_instances=1,
         )
+
+        # Poll for new call recordings every 30 minutes (real-time fallback)
+        scheduler.add_job(
+            lambda: poll_new_recordings(
+                db=db,
+                webhook_url=settings.bitrix_webhook_url,
+                transcribe_url=settings.transcribe_url,
+                whisper_url=settings.whisper_url,
+            ),
+            IntervalTrigger(minutes=30),
+            id="bitrix_poll_recordings",
+            name="Bitrix24: Poll new call recordings",
+            max_instances=1,
+            coalesce=True,
+        )
+
         log.info("bitrix_sync_scheduled", hour=settings.bitrix_sync_hour)
 
     log.info(

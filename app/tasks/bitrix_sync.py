@@ -145,12 +145,20 @@ def _enrich_call_record_urls(client: Any, conn: Any, lead: dict, stats: dict) ->
 
     for rec in records:
         record_url = rec.get("CALL_RECORD_URL") or rec.get("SRC_URL") or ""
+        record_file_id = rec.get("RECORD_FILE_ID")
         bitrix_call_id = rec.get("CALL_ID", "")
         phone_number = rec.get("PHONE_NUMBER", "")
 
-        # Skip if neither record_url nor phone_number
-        if not record_url and not phone_number:
+        # Skip if no recording info and no phone
+        if not record_url and not record_file_id and not phone_number:
             continue
+
+        # Determine new transcript_status:
+        # - 'pending' if we have record_file_id (preferred) or record_url
+        # - keep 'no_record' otherwise
+        has_recording = bool(record_file_id or record_url)
+        new_status = "pending" if has_recording else None
+
         try:
             cur = conn.cursor()
             try:
@@ -160,11 +168,18 @@ def _enrich_call_record_urls(client: Any, conn: Any, lead: dict, stats: dict) ->
                     cur.execute(
                         """
                         UPDATE bitrix_calls
-                        SET record_url = %s, phone_number = %s, transcript_status = 'pending'
+                        SET record_url = %s,
+                            record_file_id = %s,
+                            phone_number = %s,
+                            transcript_status = CASE
+                                WHEN %s IS NOT NULL THEN %s
+                                ELSE transcript_status
+                            END
                         WHERE bitrix_call_id = %s
                           AND transcript_status = 'no_record'
                         """,
-                        (record_url, phone_number, bitrix_call_id),
+                        (record_url or None, record_file_id, phone_number,
+                         new_status, new_status, bitrix_call_id),
                     )
                 else:
                     # Fallback: match by lead_id + call date (within same minute)
@@ -174,14 +189,22 @@ def _enrich_call_record_urls(client: Any, conn: Any, lead: dict, stats: dict) ->
                         cur.execute(
                             """
                             UPDATE bitrix_calls
-                            SET record_url = %s, phone_number = %s, transcript_status = 'pending'
+                            SET record_url = %s,
+                                record_file_id = %s,
+                                phone_number = %s,
+                                transcript_status = CASE
+                                    WHEN %s IS NOT NULL THEN %s
+                                    ELSE transcript_status
+                                END
                             WHERE bitrix_lead_id = %s
                               AND transcript_status = 'no_record'
                               AND DATE_TRUNC('minute', call_date) =
                                   DATE_TRUNC('minute', %s::timestamptz)
                             LIMIT 1
                             """,
-                            (record_url, phone_number, lead["bitrix_lead_id"], call_start),
+                            (record_url or None, record_file_id, phone_number,
+                             new_status, new_status,
+                             lead["bitrix_lead_id"], call_start),
                         )
                 conn.commit()
                 if cur.rowcount and cur.rowcount > 0:
@@ -576,6 +599,96 @@ def sync_comments(client: Any, conn: Any, leads: list[dict]) -> dict:
 
 # ── Wave 4 orchestration ──────────────────────────────────────────────────────
 
+def poll_new_recordings(
+    db: Any,
+    webhook_url: str,
+    transcribe_url: str,
+    lookback_hours: int = 25,
+    whisper_url: str = "",
+) -> dict:
+    """
+    Poll voximplant.statistic.get for recently ended calls with recordings
+    and enrich/transcribe any that are new or not yet transcribed.
+
+    Runs every 15-30 min as a lightweight complement to the daily full sync.
+    Does NOT re-sync leads — only looks at calls already in bitrix_calls.
+    """
+    from datetime import timezone
+    from datetime import datetime, timedelta
+    from app.integrations.bitrix24 import Bitrix24Client
+    from app.tasks.bitrix_summary import transcribe_pending_calls
+
+    log.info("poll_new_recordings_started", lookback_hours=lookback_hours)
+    stats = {"enriched": 0, "transcribed": 0, "errors": 0}
+
+    since_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        client = Bitrix24Client(webhook_url)
+        try:
+            records = client.get_call_history(filter={
+                ">=CALL_START_DATE": since_str,
+                "CALL_RECORD_URL": "%",  # only calls with recordings
+            })
+        except Exception as e:
+            log.warning("poll_voximplant_failed", error=str(e))
+            records = []
+
+        if records:
+            with db.connection() as conn:
+                for rec in records:
+                    record_file_id = rec.get("RECORD_FILE_ID")
+                    if not record_file_id:
+                        continue
+                    bitrix_call_id = rec.get("CALL_ID", "")
+                    record_url = rec.get("CALL_RECORD_URL") or rec.get("SRC_URL") or ""
+
+                    try:
+                        cur = conn.cursor()
+                        try:
+                            cur.execute(
+                                """
+                                UPDATE bitrix_calls
+                                SET record_file_id = %s,
+                                    record_url = COALESCE(record_url, %s),
+                                    transcript_status = 'pending'
+                                WHERE bitrix_call_id = %s
+                                  AND transcript_status IN ('no_record', 'failed')
+                                  AND (record_file_id IS NULL OR record_file_id != %s)
+                                """,
+                                (record_file_id, record_url or None,
+                                 bitrix_call_id, record_file_id),
+                            )
+                            conn.commit()
+                            if cur.rowcount and cur.rowcount > 0:
+                                stats["enriched"] += 1
+                        except Exception as e:
+                            conn.rollback()
+                            log.warning("poll_update_failed", call_id=bitrix_call_id, error=str(e))
+                        finally:
+                            cur.close()
+                    except Exception as e:
+                        log.warning("poll_enrich_error", error=str(e))
+                        stats["errors"] += 1
+        client.close()
+    except Exception as e:
+        log.error("poll_new_recordings_error", error=str(e))
+        stats["errors"] += 1
+
+    # Now transcribe whatever is pending
+    try:
+        result = transcribe_pending_calls(db, transcribe_url, limit=10,
+                                          bitrix_webhook_url=webhook_url, whisper_url=whisper_url)
+        stats["transcribed"] = result.get("transcribed", 0)
+    except Exception as e:
+        log.error("poll_transcribe_failed", error=str(e))
+        stats["errors"] += 1
+
+    log.info("poll_new_recordings_done", **stats)
+    return stats
+
+
 def run_bitrix_sync(
     db: Any,
     llm: Any,
@@ -583,6 +696,7 @@ def run_bitrix_sync(
     webhook_url: str,
     contract_field: str,
     transcribe_url: str,
+    whisper_url: str = "",
 ) -> dict:
     """
     Main orchestration entry point for daily Bitrix24 sync.
@@ -642,7 +756,8 @@ def run_bitrix_sync(
 
         # Step 7: Transcribe pending calls (outside conn — separate commits per call)
         try:
-            result = transcribe_pending_calls(db, transcribe_url)
+            result = transcribe_pending_calls(db, transcribe_url,
+                                              bitrix_webhook_url=webhook_url, whisper_url=whisper_url)
             stats["transcribed"] = result.get("transcribed", 0)
             log.info("transcription_done", count=stats["transcribed"])
         except Exception as e:

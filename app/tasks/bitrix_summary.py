@@ -22,33 +22,69 @@ log = get_logger("bitrix_summary")
 DIRECTION_IN = 1
 DIRECTION_OUT = 2
 
-BITRIX_SUMMARY_SYSTEM = (
-    "Ты бизнес-аналитик компании фулфилмент. "
-    "Анализируй коммуникации с клиентом и составляй чёткие, структурированные сводки. "
-    "Пиши только о фактах из предоставленных данных."
+LEAD_SUMMARY_SYSTEM = (
+    "Ты — старший бизнес-аналитик отдела продаж фулфилмент-оператора. "
+    "Твоя задача — анализировать коммуникации с потенциальными клиентами (лидами) "
+    "и составлять четкие выжимки, которые помогут менеджерам закрыть сделку. "
+    "Пиши структурно, выделяй возражения и потребности."
 )
 
-BITRIX_SUMMARY_PROMPT = """Проанализируй коммуникации с клиентом {client_label} за {date}.
+LEAD_SUMMARY_PROMPT = """Проанализируй коммуникации с потенциальным клиентом {client_label} за {date}.
 
 {content}
 
-Составь сводку в формате Markdown:
-## Резюме ({date})
-(2-3 предложения о ключевых событиях дня)
+Составь сводку в формате Markdown строго по структуре ниже. Пиши только факты из предоставленных данных, без общих фраз.
 
-## Звонки ({calls_count} шт.)
-(ключевые темы, договорённости — если есть транскрипция)
+## Статус переговоров ({date})
+(2-3 предложения: на каком этапе находится сделка, общий настрой клиента)
 
-## Письма ({emails_count} шт.)
-(о чём переписывались, важные детали из текста писем)
+## Потребности и Запросы
+(какие услуги фулфилмента интересуют клиента, какие объемы/маркетплейсы обсуждались. Если нет данных — не пиши блок)
 
-## Комментарии ({comments_count} шт.)
-(что отметили сотрудники)
+## Возражения и Сомнения
+(если клиент сомневается из-за цены, сроков, условий — выпиши это, если нет — напиши "Не выявлено")
 
-## Следующие шаги
-(явные задачи/договорённости или "Не выявлено")
+## Детали коммуникаций
+(краткая выжимка из звонков ({calls_count} шт.), писем ({emails_count} шт.) и комментариев ({comments_count} шт.), о чем конкретно шла речь)
 
-Максимум 1000 слов. Только факты из предоставленных данных."""
+## Следующие шаги менеджера
+(явные задачи или договоренности: отправить КП, перезвонить в среду и т.д. Если нет - "Не выявлено")
+
+Максимум 1000 слов."""
+
+
+CONTACT_SUMMARY_SYSTEM = (
+    "Ты — старший аналитик отдела клиентского сервиса фулфилмент-оператора. "
+    "Твоя задача — анализировать коммуникации с действующими клиентами (селлерами) "
+    "и составлять четкие операционные сводки для кураторов. "
+    "Выделяй проблемы, текущие задачи и недовольства."
+)
+
+CONTACT_SUMMARY_PROMPT = """Проанализируй коммуникации с действующим клиентом {client_label} за {date}.
+
+{content}
+
+Составь сводку в формате Markdown строго по структуре ниже. Пиши только факты из предоставленных данных, без общих фраз.
+
+## Главное за день ({date})
+(2-3 предложения о ключевых операционных событиях: отгрузки, приемки, общие вопросы)
+
+## Индекс счастья и Проблемы
+(есть ли жалобы, недовольство сроками, ошибки склада, или наоборот похвала. ЕСЛИ ПРОБЛЕМ И ЖАЛОБ НЕТ — НИЧЕГО НЕ ПИШИ В ЭТОТ БЛОК)
+
+## Операционные задачи
+(какие конкретные задачи обсуждались: маркировка, переупаковка, брак, возвраты и т.д. Если нет данных — не пиши блок)
+
+## 🔄 Открытые вопросы (Длительные кейсы)
+(Если обсуждается вопрос, который не решился за один день (например, поиск потерянного товара, долгая сверка актов, перерасчет), выдели его суть в 1 предложение. Начни строку с [Кейс: КРАТКОЕ_НАЗВАНИЕ]. Это поможет связывать историю в будущем. Если таких длительных вопросов нет — не пиши этот блок.)
+
+## Детали коммуникаций
+(краткая выжимка из звонков ({calls_count} шт.), писем ({emails_count} шт.) и комментариев сотрудников ({comments_count} шт.))
+
+## Договоренности и Ожидания
+(что куратор или склад пообещали сделать для клиента. Если ничего — не пиши блок)
+
+Максимум 1000 слов."""
 
 
 def _strip_html(text: str) -> str:
@@ -162,8 +198,14 @@ def generate_bitrix_summaries(
             if not dataset_id:
                 try:
                     # Contacts (LEAD-* or with ФФ-number) get human-readable name
-                    dataset_name = ff_number if ff_number and not diffy_lead_id.startswith("BX-LEAD-") else diffy_lead_id
-                    dataset_id = dify.create_dataset(dataset_name)
+                    is_contact = not diffy_lead_id.startswith("BX-LEAD-")
+                    dataset_name = ff_number if ff_number and is_contact else diffy_lead_id
+                    
+                    # Add tag to description
+                    tag = "ДОГОВОР" if is_contact else "ЛИД"
+                    description = f"Тип: {tag}"
+                    
+                    dataset_id = dify.create_dataset(name=dataset_name, description=description)
                     if dataset_id:
                         db.save_bitrix_dataset_mapping(diffy_lead_id, dataset_id)
                         dataset_map[diffy_lead_id] = dataset_id
@@ -185,7 +227,17 @@ def generate_bitrix_summaries(
 
                     content = _build_content(calls, emails, comments)
                     client_label = ff_number if ff_number else diffy_lead_id
-                    prompt = BITRIX_SUMMARY_PROMPT.format(
+                    
+                    is_contact = not diffy_lead_id.startswith("BX-LEAD-")
+                    
+                    if is_contact:
+                        prompt_template = CONTACT_SUMMARY_PROMPT
+                        system_prompt = CONTACT_SUMMARY_SYSTEM
+                    else:
+                        prompt_template = LEAD_SUMMARY_PROMPT
+                        system_prompt = LEAD_SUMMARY_SYSTEM
+
+                    prompt = prompt_template.format(
                         client_label=client_label,
                         date=str(proc_date),
                         content=content,
@@ -194,7 +246,7 @@ def generate_bitrix_summaries(
                         comments_count=len(comments),
                     )
 
-                    raw_summary = llm.generate(BITRIX_SUMMARY_SYSTEM, prompt, max_tokens=1500)
+                    raw_summary = llm.generate(system_prompt, prompt, max_tokens=1500)
                     # Prepend client label header so RAG search finds it by ФФ-number
                     header = f"# Клиент: {client_label}\n"
                     if ff_number:
@@ -244,58 +296,150 @@ def generate_bitrix_summaries(
     return stats
 
 
+def _get_audio_suffix(content_type: str) -> str:
+    """Determine audio file suffix from Content-Type header."""
+    ct = content_type.lower()
+    if "wav" in ct:
+        return ".wav"
+    if "ogg" in ct:
+        return ".ogg"
+    if "webm" in ct:
+        return ".webm"
+    return ".mp3"
+
+
+def _download_via_disk_api(bitrix_client: Any, file_id: int) -> bytes | None:
+    """
+    Download a call recording from Bitrix24 Disk using RECORD_FILE_ID.
+    Uses disk.file.get to get a temporary DOWNLOAD_URL, then fetches the file.
+    Returns raw bytes or None on failure.
+    """
+    download_url = bitrix_client.get_disk_download_url(file_id)
+    if not download_url:
+        log.warning("disk_download_url_missing", file_id=file_id)
+        return None
+
+    try:
+        resp = requests.get(download_url, timeout=60, stream=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        # Sanity check: should be audio, not HTML login page
+        if "text/html" in content_type:
+            log.warning("disk_download_returned_html", file_id=file_id)
+            return None
+        return resp.content
+    except Exception as e:
+        log.warning("disk_download_failed", file_id=file_id, error=str(e))
+        return None
+
+
 def transcribe_pending_calls(
     db: Database,
     transcribe_url: str,
     limit: int = 20,
+    bitrix_webhook_url: str = "",
+    whisper_url: str = "",
 ) -> dict:
     """
     Download and transcribe call recordings via Whisper service.
+    Download priority:
+      1. RECORD_FILE_ID → Bitrix Disk API (disk.file.get + DOWNLOAD_URL)
+      2. record_url → direct HTTP (legacy MegaPBX, usually fails)
     Processes up to `limit` pending calls per run.
     """
-    stats = {"transcribed": 0, "failed": 0}
-    calls = db.get_calls_pending_transcription()  # already LIMIT 20
+    from app.integrations.bitrix24 import Bitrix24Client
+
+    stats = {"transcribed": 0, "failed": 0, "no_source": 0}
+    calls = db.get_calls_pending_transcription(limit=limit)
+
+    # Create Bitrix client once if we have a webhook URL
+    bitrix_client: Any = None
+    if bitrix_webhook_url:
+        try:
+            bitrix_client = Bitrix24Client(bitrix_webhook_url)
+        except Exception as e:
+            log.warning("bitrix_client_init_failed", error=str(e))
 
     for call in calls:
         tmp_path: str | None = None
         try:
-            record_url = call["record_url"]
-            log.info("transcribe_downloading", call_id=call["id"], url=record_url[:80])
+            record_file_id = call.get("record_file_id")
+            record_url = call.get("record_url")
 
-            # Download recording
-            dl_resp = requests.get(record_url, timeout=60, stream=True)
-            if dl_resp.status_code in (403, 404):
-                log.warning("transcribe_unavailable", call_id=call["id"], status=dl_resp.status_code)
+            audio_data: bytes | None = None
+            suffix = ".mp3"
+
+            # --- Method 1: Bitrix Disk API (preferred) ---
+            if record_file_id and bitrix_client:
+                log.info("transcribe_via_disk_api", call_id=call["id"], file_id=record_file_id)
+                # Get fresh download URL from disk.file.get
+                download_url = bitrix_client.get_disk_download_url(int(record_file_id))
+                if download_url:
+                    try:
+                        dl_resp = requests.get(download_url, timeout=60, stream=True)
+                        dl_resp.raise_for_status()
+                        content_type = dl_resp.headers.get("Content-Type", "")
+                        if "text/html" not in content_type:
+                            suffix = _get_audio_suffix(content_type)
+                            audio_data = dl_resp.content
+                            log.info("transcribe_disk_download_ok",
+                                     call_id=call["id"], file_id=record_file_id,
+                                     size=len(audio_data), content_type=content_type)
+                        else:
+                            log.warning("transcribe_disk_returned_html",
+                                        call_id=call["id"], file_id=record_file_id)
+                    except Exception as e:
+                        log.warning("transcribe_disk_download_failed",
+                                    call_id=call["id"], file_id=record_file_id, error=str(e))
+
+            # --- Method 2: Direct URL fallback (legacy MegaPBX) ---
+            if audio_data is None and record_url:
+                log.info("transcribe_via_direct_url", call_id=call["id"], url=record_url[:80])
+                try:
+                    dl_resp = requests.get(record_url, timeout=30, stream=True)
+                    if dl_resp.status_code in (403, 404):
+                        log.warning("transcribe_url_unavailable",
+                                    call_id=call["id"], status=dl_resp.status_code)
+                    else:
+                        dl_resp.raise_for_status()
+                        content_type = dl_resp.headers.get("Content-Type", "")
+                        if "text/html" not in content_type:
+                            suffix = _get_audio_suffix(content_type)
+                            audio_data = dl_resp.content
+                except Exception as e:
+                    log.warning("transcribe_url_download_failed",
+                                call_id=call["id"], error=str(e))
+
+            # --- No audio obtained ---
+            if not audio_data:
+                log.warning("transcribe_no_audio_source", call_id=call["id"],
+                            has_file_id=bool(record_file_id), has_url=bool(record_url))
                 db.update_call_transcript(call["id"], "", "failed")
-                stats["failed"] += 1
+                stats["no_source"] += 1
                 continue
 
-            dl_resp.raise_for_status()
-
-            # Save to temp file
-            suffix = ".mp3"
-            content_type = dl_resp.headers.get("Content-Type", "")
-            if "wav" in content_type:
-                suffix = ".wav"
-            elif "ogg" in content_type:
-                suffix = ".ogg"
-
+            # --- Save to temp file ---
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp_path = tmp.name
-                for chunk in dl_resp.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
+                tmp.write(audio_data)
 
-            # Send to Whisper
-            asr_url = transcribe_url.rstrip("/") + "/asr"
+            # --- Send to Whisper (direct /v1/audio/transcriptions) ---
+            # Use whisper_url if provided, else try transcribe_url + /v1/audio/transcriptions
+            if whisper_url:
+                asr_url = whisper_url.rstrip("/") + "/v1/audio/transcriptions"
+            else:
+                asr_url = transcribe_url.rstrip("/") + "/v1/audio/transcriptions"
+            mime = "audio/mpeg" if suffix == ".mp3" else f"audio/{suffix[1:]}"
             with open(tmp_path, "rb") as audio_file:
                 upload_resp = requests.post(
                     asr_url,
-                    files={"audio_file": (f"audio{suffix}", audio_file, f"audio/{suffix[1:]}")},
-                    timeout=300,
+                    files={"file": (f"audio{suffix}", audio_file, mime)},
+                    data={"language": "ru"},
+                    timeout=900,  # 15 мин — CPU Whisper медленный, ~1.3x реального времени
                 )
             upload_resp.raise_for_status()
 
-            # Extract transcript text
+            # --- Extract transcript text ---
             result_data = upload_resp.json()
             transcript_text = (
                 result_data.get("text")
@@ -313,7 +457,8 @@ def transcribe_pending_calls(
             try:
                 db.update_call_transcript(call["id"], "", "failed")
             except Exception as db_err:
-                log.warning("transcribe_status_update_failed", call_id=call.get("id"), error=str(db_err))
+                log.warning("transcribe_status_update_failed",
+                            call_id=call.get("id"), error=str(db_err))
             stats["failed"] += 1
 
         finally:
@@ -322,6 +467,12 @@ def transcribe_pending_calls(
                     os.unlink(tmp_path)
                 except Exception:
                     pass  # temp file cleanup — best effort
+
+    if bitrix_client:
+        try:
+            bitrix_client.close()
+        except Exception:
+            pass
 
     log.info("transcribe_pending_calls_done", **stats)
     return stats
